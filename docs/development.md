@@ -111,6 +111,7 @@ To improve query understanding:
 
 1. Modify prompts in the `QueryProcessor` class
 2. Add more example queries and improve parsing logic
+3. Extend the RAG capabilities for improved schema mapping (see [RAG Architecture](rag_architecture.md))
 
 ### Adding New Query Types
 
@@ -119,6 +120,53 @@ To add support for new query types:
 1. Update the `ParsedQuery` model in `data_models.py`
 2. Add parsing logic in `QueryProcessor.parse_query()`
 3. Implement execution in `QueryProcessor.process_query()`
+4. Update the RAG embeddings if necessary to support new query types
+
+## Working with RAG Components
+
+LongitudinalLLM uses a Retrieval-Augmented Generation (RAG) architecture to map natural language to dataset schemas.
+
+### Customizing Vector Embeddings
+
+To customize the vector embeddings:
+
+```python
+# Use a different embedding model
+query_processor = QueryProcessor(embed_model="your-model-name")
+```
+
+### Extending Schema Descriptions
+
+To improve schema mapping:
+
+1. Add more descriptive text for columns in `setup_vector_db()`:
+
+```python
+schema_descriptions.append({
+    "text": "detailed description of the column and its meaning",
+    "metadata": {
+        "dataset": dataset_name,
+        "column": column
+    }
+})
+```
+
+2. For domain-specific terminology, add alternative descriptions:
+
+```python
+# For medical terms
+if column == "mobility_score":
+    schema_descriptions.append({
+        "text": "patient mobility assessment on scale 1-10",
+        "metadata": {"dataset": dataset_name, "column": column}
+    })
+    schema_descriptions.append({
+        "text": "ability to move independently",
+        "metadata": {"dataset": dataset_name, "column": column}
+    })
+```
+
+See the [RAG Architecture](rag_architecture.md) document for more details on how the retrieval system works.
 
 ## Working with Ollama
 

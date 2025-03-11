@@ -125,6 +125,45 @@ Before using your data with LongitudinalLLM, consider these preprocessing steps:
 3. **Ensure consistent IDs**: Verify that identifiers are consistent across datasets
 4. **Add column descriptions**: Create good descriptions for vector search matching
 
+## Optimizing for RAG
+
+LongitudinalLLM uses a RAG (Retrieval-Augmented Generation) architecture to understand your datasets. To optimize performance:
+
+### Improving Column Recognition
+
+The system uses vector embeddings to map natural language to your column names. For best results:
+
+1. **Use descriptive column names**: Names like `patient_age` are easier to match than `pat_a`
+2. **Add column metadata**: Create a metadata file with detailed descriptions of each column
+
+```json
+{
+  "column_descriptions": [
+    {
+      "dataset": "patient_demographics",
+      "column": "recovery_score",
+      "descriptions": [
+        "Patient recovery assessment on a scale of 1-10",
+        "How well the patient has recovered from treatment",
+        "Recovery level measured by clinicians"
+      ]
+    }
+  ]
+}
+```
+
+3. **Include domain terminology**: Add domain-specific terms that users might use
+
+### Documentation Recommendations
+
+For complex datasets:
+
+1. Create a data dictionary with detailed explanations of each column
+2. Document any transformations applied to the data
+3. Explain the relationships between different datasets
+
+For more information on how LongitudinalLLM understands your data schema, see the [RAG Architecture](rag_architecture.md) document.
+
 ## Example Custom Data Setup
 
 Here's a complete example:

@@ -72,6 +72,29 @@ streamlit run app.py
 - "Explain how the overall health score was calculated"
 - "What transformations were applied to the pain level variable?"
 
+## Architecture
+
+LongitudinalLLM uses a modular architecture:
+
+1. **Query Understanding**: LLM-powered natural language parsing
+2. **Schema Mapping**: Vector similarity to map terms to columns
+3. **Query Execution**: Dynamic query planning and execution
+4. **Verification Tracking**: Dataset lineage and transformation history
+5. **Explanation Generation**: LLM-generated natural language explanations
+
+## RAG Architecture
+
+LongitudinalLLM uses Retrieval-Augmented Generation (RAG) to bridge the gap between natural language and data structures:
+
+- 🧠 **Semantic Understanding**: Maps natural language descriptions to actual dataset columns
+- 📊 **Schema Vectorization**: Embeds dataset schemas using ChromaDB and Ollama embeddings
+- 🔎 **Vector Similarity Search**: Finds the most relevant columns based on semantic similarity
+- 🤖 **LLM-Powered Workflow**: Combines retrieval with LLM generation for accurate results
+
+The system embeds descriptions of each column in your datasets, creating a semantic index that enables users to ask questions using everyday language without knowing exact column names.
+
+[Learn more about our RAG architecture](docs/rag_architecture.md)
+
 ## Project Structure
 
 ```
@@ -99,16 +122,6 @@ To use with your own longitudinal datasets:
 3. Add custom transformation tracking in `src/data_models.py`
 
 See the [documentation](docs/custom_data.md) for detailed instructions.
-
-## Architecture
-
-LongitudinalLLM uses a modular architecture:
-
-1. **Query Understanding**: LLM-powered natural language parsing
-2. **Schema Mapping**: Vector similarity to map terms to columns
-3. **Query Execution**: Dynamic query planning and execution
-4. **Verification Tracking**: Dataset lineage and transformation history
-5. **Explanation Generation**: LLM-generated natural language explanations
 
 ## Contributing
 
