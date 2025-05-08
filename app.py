@@ -18,7 +18,7 @@ st.set_page_config(
 # Constants
 MODEL_NAME = "llama3.2:latest"
 EMBEDDING_MODEL = "nomic-embed-text:latest"
-DATA_PATH = "data/survey_data.json"
+DATA_PATH = "data/hrs_data.json"
 
 # Session state initialization
 if "initialized" not in st.session_state:

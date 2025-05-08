@@ -92,11 +92,359 @@ class HRSDataScraper:
 
         return True
 
+    def clean_text(self,text):
+        """Clean text by removing Unicode replacement characters and extra whitespace"""
+        if not text:
+            return ""
+        # Remove Unicode replacement character
+        text = text.replace('\ufffd', '')
+        # Replace multiple whitespace with single space
+        text = re.sub(r'\s+', ' ', text)
+        # Remove newlines
+        text = text.replace('\n', ' ')
+        # Strip leading/trailing whitespace
+        return text.strip()
+
     def parse_section(self, section_text, anchor_name=None):
         """Parse a section of text into structured variable data"""
-        # The original parse_section method remains unchanged
-        # (Paste the entire parse_section method from the original script here)
-        # ... (keep the exact same implementation as in the original script)
+        lines = section_text.strip().split('\n')
+
+        # Skip sections that are too short
+        if len(lines) < 2:
+            return None
+
+        item = {
+            "variableName": "",
+            "description": "",
+            "Section": "",
+            "Level": "",
+            "Type": "",
+            "Width": "",
+            "Decimals": "",
+            "CAI Reference": "",
+            "question": "",
+            "response": {}
+        }
+
+        # First set variableName from anchor if available
+        if anchor_name and re.match(r'^[A-Z0-9]+$', anchor_name):
+            item["variableName"] = anchor_name
+
+        # Parse first non-empty line for variable name and description
+        first_line_index = -1
+        for i, line in enumerate(lines):
+            if line.strip():
+                first_line = line.strip()
+                first_line_index = i
+
+                # Try different patterns for variable name and description extraction
+                match1 = re.match(r'^([A-Z0-9]+)\s{2,}(.+)$', first_line)
+                match2 = re.match(r'^([A-Z0-9]+)\s+(.+)$', first_line)
+
+                if match1:
+                    item["variableName"] = match1.group(1).strip()
+                    item["description"] = (match1.group(2))
+                    break
+                elif match2 and len(match2.group(1)) >= 3:  # Minimum length to avoid false positives
+                    item["variableName"] = match2.group(1).strip()
+                    item["description"] = self.clean_text(match2.group(2))
+                    break
+                break  # Only check the first non-empty line
+
+        # Find metadata line
+        metadata_line_index = -1
+        for i, line in enumerate(lines):
+            if 'Section:' in line and any(x in line for x in ['Level:', 'Type:', 'Width:']):
+                metadata_line_index = i
+                metadata_line = line.strip()
+
+                # Extract metadata values
+                section_match = re.search(r'Section:\s*(\w+)', metadata_line)
+                level_match = re.search(r'Level:\s*(\w+)', metadata_line)
+                type_match = re.search(r'Type:\s*(\w+)', metadata_line)
+                width_match = re.search(r'Width:\s*(\d+)', metadata_line)
+                decimals_match = re.search(r'Decimals:\s*(\d+)', metadata_line)
+
+                if section_match: item["Section"] = section_match.group(1)
+                if level_match: item["Level"] = level_match.group(1)
+                if type_match: item["Type"] = type_match.group(1)
+                if width_match: item["Width"] = width_match.group(1)
+                if decimals_match: item["Decimals"] = decimals_match.group(1)
+                break
+
+        # Find CAI Reference
+        cai_ref_index = -1
+        for i, line in enumerate(lines):
+            if 'CAI Reference:' in line:
+                cai_parts = line.split('CAI Reference:', 1)
+                if len(cai_parts) > 1:
+                    item["CAI Reference"] = self.clean_text(cai_parts[1])
+                    cai_ref_index = i
+                    break
+            elif re.search(r'CAI\s+Ref(erence)?:', line, re.IGNORECASE):
+                cai_match = re.search(r'CAI\s+Ref(erence)?:\s*(.+)$', line, re.IGNORECASE)
+                if cai_match:
+                    item["CAI Reference"] = self.clean_text(cai_match.group(2))
+                    cai_ref_index = i
+                    break
+
+        # Find separator line that marks beginning of responses
+        response_start_index = -1
+        for i, line in enumerate(lines):
+            if i > metadata_line_index and metadata_line_index != -1:
+                if (re.search(r'[-_.]{5,}', line) or
+                        re.search(r'\.\s*\.\s*\.', line) or
+                        re.search(r'\.{5,}', line) or
+                        line.strip() == '-' * len(line.strip()) or
+                        '______' in line or
+                        all(c in '-_.' for c in line.strip())):
+                    response_start_index = i
+                    break
+
+        # If no separator found, look for response-like patterns
+        if response_start_index == -1 and metadata_line_index != -1:
+            for i, line in enumerate(lines):
+                if i > metadata_line_index:
+                    if (re.match(r'^\s*\d+\s+\d+\.', line) or
+                            re.match(r'^\s*\d+\.\s+.+\d+$', line) or
+                            re.match(r'^\s*\d+\s+[A-Za-z]', line) or
+                            re.match(r'^\s*[A-Za-z0-9.-]+\s+\d+$', line) or
+                            re.match(r'^\s*\d+\.\s+.+', line) and i > metadata_line_index + 3):
+                        response_start_index = i - 1
+                        break
+
+        # Extract question text - starting after metadata
+        if metadata_line_index != -1:
+            question_start_index = metadata_line_index + 1
+
+            # Find where question text ends
+            question_end_index = -1
+            for i in range(question_start_index, len(lines)):
+                line = lines[i].strip()
+                if re.search(r'\.{5,}', line) or re.search(r'\.\s*\.\s*\.', line):
+                    question_end_index = i
+                    break
+
+            # If no end marker found but responses start is known, use that
+            if question_end_index == -1 and response_start_index != -1:
+                question_end_index = response_start_index
+
+            # If we found a valid range for question text
+            if question_end_index > question_start_index:
+                # Skip the CAI Reference line if present
+                question_lines = []
+                for i in range(question_start_index, question_end_index):
+                    line = lines[i].strip()
+                    # Skip empty lines at beginning
+                    if not line and not question_lines:
+                        continue
+                    # Skip lines with CAI Reference
+                    if 'CAI Reference:' in line or re.search(r'CAI\s+Ref(erence)?:', line, re.IGNORECASE):
+                        continue
+                    question_lines.append(line)
+
+                # Combine lines and clean up
+                if question_lines:
+                    question_text = '\n'.join(question_lines)
+                    # Remove "Ask:" prefix if present
+                    question_text = re.sub(r'^Ask:\s*', '', question_text)
+                    item["question"] = self.clean_text(question_text)
+
+        # Extract responses
+        if response_start_index != -1:
+            # Check for checkbox/multiple choice patterns
+            is_checkbox_list = False
+            num_options_without_counts = 0
+
+            for i in range(response_start_index + 1, min(response_start_index + 10, len(lines))):
+                line = lines[i].strip()
+                if not line:
+                    continue
+                if re.match(r'^\d+\.\s+.+$', line) and not re.match(r'^\d+\.\s+.+\d+$', line):
+                    num_options_without_counts += 1
+
+            if num_options_without_counts >= 2:
+                is_checkbox_list = True
+
+            # Process lines after response separator
+            numeric_values_found = False
+            processed_stats_line = False
+            current_description = []
+            current_count = None
+            current_number = None
+
+            for i in range(response_start_index + 1, len(lines)):
+                line = lines[i].strip()
+                if not line:
+                    continue
+
+                # Pattern for descriptive statistics with multiple columns
+                if line.strip() == "-----------------------------------------------------------------":
+                    continue
+
+                # Check if this is a statistics header/value line
+                stats_match = re.match(
+                    r'^\s*(N|Min|Max|Mean|SD|Miss)\s+(N|Min|Max|Mean|SD|Miss)\s+(N|Min|Max|Mean|SD|Miss)\s+(N|Min|Max|Mean|SD|Miss)\s+(N|Min|Max|Mean|SD|Miss)\s+(N|Min|Max|Mean|SD|Miss)\s*$',
+                    line)
+
+                if stats_match and i + 1 < len(lines):
+                    value_line = lines[i + 1].strip()
+                    values = re.findall(r'(\d+(?:\.\d+)?)', value_line)
+                    headers = ['N', 'Min', 'Max', 'Mean', 'SD', 'Miss']
+                    if len(values) == len(headers):
+                        for header, value in zip(headers, values):
+                            try:
+                                if '.' in value:
+                                    item["response"][header] = float(value)
+                                else:
+                                    item["response"][header] = int(value)
+                            except ValueError:
+                                item["response"][header] = value
+                        processed_stats_line = True
+                        continue
+                if processed_stats_line:
+                    processed_stats_line = False
+                    continue
+
+                # Pattern 1: Number at beginning followed by option and text (for multi-line descriptions)
+                match_multi_start = re.match(r'^(\d+)\s+(\d+\.)\s+(.+)$', line)
+
+                if match_multi_start:
+                    # Save previous description if exists
+                    if current_description and current_count is not None and current_number is not None:
+                        full_description = self.clean_text(" ".join(current_description))
+                        label = f"{current_number} {full_description}"
+                        item["response"][label] = current_count
+
+                    # Start new response item
+                    current_count = int(match_multi_start.group(1))
+                    current_number = match_multi_start.group(2)
+                    current_description = [match_multi_start.group(3)]
+                    continue
+
+                # Check if this is continuation of description
+                elif current_description and (line.startswith(' ') or re.match(r'^[a-zA-Z]', line)):
+                    current_description.append(line.strip())
+                    continue
+
+                # If we're here, save current multi-line item if exists
+                if current_description and current_count is not None and current_number is not None:
+                    full_description = self.clean_text(" ".join(current_description))
+                    label = f"{current_number} {full_description}"
+                    item["response"][label] = current_count
+                    current_description = []
+                    current_count = None
+                    current_number = None
+
+                # Now try other patterns from script 1
+                # Pattern 2: Option number/letter followed by text and number at end
+                match1 = re.match(r'^(\d+\.|\w\.)\s+(.+?)\s+(\d+)$', line)
+
+                # Pattern 3: Text followed by number at end
+                match2 = re.match(r'^(.+?)\s+(\d+)$', line)
+
+                # Pattern 4: Number at beginning followed by option and text (single line)
+                match3 = re.match(r'^(\d+)\s+(\d+\.|\w\.)\s+(.+)$', line)
+
+                # Pattern 5: Number at beginning followed by text
+                match4 = re.match(r'^(\d+)\s+(.+)$', line)
+
+                # Pattern 6: Just numbered options
+                match5 = re.match(r'^(\d+\.|\w\.)\s+(.+)$', line)
+
+                # Track if we found any numeric values for responses
+                if match1 or match2 or match3 or match4:
+                    numeric_values_found = True
+
+                if match1:
+                    option = match1.group(1).strip()
+                    text = self.clean_text(match1.group(2))
+                    count = int(match1.group(3))
+                    label = f"{option} {text}"
+                    if not re.search(r'Section:\s+\w+', label):
+                        item["response"][label] = count
+                elif match2:
+                    label = self.clean_text(match2.group(1))
+                    count = int(match2.group(2))
+                    if not re.search(r'Section:\s+\w+', label):
+                        item["response"][label] = count
+                elif match3 and not match_multi_start:  # Avoid double-matching
+                    count = int(match3.group(1))
+                    option = match3.group(2).strip()
+                    text = self.clean_text(match3.group(3))
+                    label = f"{option} {text}"
+                    if not re.search(r'Section:\s+\w+', label):
+                        item["response"][label] = count
+                elif match4:
+                    # More careful matching for pattern 4 to avoid false positives
+                    count_str = match4.group(1)
+                    remaining_text = match4.group(2).strip()
+
+                    # Skip if this looks like a pattern 1 case (has option marker immediately after count)
+                    if re.match(r'^(\d+\.|\w\.)\s+', remaining_text):
+                        continue
+
+                    # Skip if the label contains common metadata patterns
+                    if any(keyword in remaining_text for keyword in
+                           ['Section:', 'Level:', 'Type:', 'Width:', 'Decimals:', 'CAI Reference', 'Person Identifier',
+                            'Household ID']):
+                        continue
+
+                    # Only process if the count is a valid integer and label looks like a response option
+                    try:
+                        count = int(count_str)
+                        if count > 0 and count < 100000:  # Reasonable range for count values
+                            item["response"][self.clean_text(remaining_text)] = count
+                    except ValueError:
+                        continue
+                elif match5 and (is_checkbox_list or not numeric_values_found):
+                    option = match5.group(1).strip()
+                    text = self.clean_text(match5.group(2))
+                    label = f"{option} {text}"
+                    if not re.search(r'Section:\s+\w+', label):
+                        item["response"][label] = ""  # Use empty string instead of None
+                else:
+                    # Check for special entries like "Blank. INAP"
+                    if "blank" in line.lower() or "inap" in line.lower() or "inapplicable" in line.lower():
+                        number_match = re.search(r'(\d+)$', line)
+                        if number_match:
+                            count = int(number_match.group(1))
+                            label_parts = re.split(r'\s+' + str(count) + r'$', line)
+                            if label_parts:
+                                label = self.clean_text(label_parts[0])
+                                item["response"][label] = count
+                        else:
+                            label = self.clean_text(line)
+                            item["response"][label] = ""  # Use empty string instead of None
+
+            # Don't forget to save the last multi-line item
+            if current_description and current_count is not None and current_number is not None:
+                full_description = self.clean_text(" ".join(current_description))
+                label = f"{current_number} {full_description}"
+                item["response"][label] = current_count
+
+        # Final validation for variable name
+        if item["variableName"] == "" and anchor_name and re.match(r'^[A-Z0-9]+$', anchor_name):
+            item["variableName"] = anchor_name
+
+            # Try to extract description from first line if it exists and wasn't already set
+            if item["description"] == "" and first_line_index != -1:
+                first_line = lines[first_line_index].strip()
+                if anchor_name in first_line:
+                    description_part = first_line.split(anchor_name, 1)[1].strip()
+                    if description_part:
+                        item["description"] = self.clean_text(description_part)
+
+        # Clean up question text
+        if item["question"]:
+            # Remove leading "Ask:" if present
+            item["question"] = re.sub(r'^Ask\s*:', '', item["question"]).strip()
+            # Clean up any remaining special patterns or markers
+            item["question"] = re.sub(r'^IF\s+\(.*?\)\s*', '', item["question"]).strip()
+            # Final cleaning
+            item["question"] = self.clean_text(item["question"])
+
+        return item
 
     def scrape_hrs_data(self, url, verbose=True):
         """Scrape data from a single HRS URL"""

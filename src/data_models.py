@@ -6,7 +6,7 @@ from uuid import UUID
 class SurveyResponse(BaseModel):
     """Model representing a response option with its count."""
     option: str
-    count: Optional[int] = None
+    count: Optional[float] = None
 
     @classmethod
     def from_dict(cls, response_dict: Dict[str, Any]) -> List["SurveyResponse"]:
