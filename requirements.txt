@@ -1,0 +1,11 @@
+streamlit
+langchain
+langchain-community
+langchain-ollama
+pydantic
+pandas
+numpy
+chromadb
+ollama
+requests
+beautifulsoup4
