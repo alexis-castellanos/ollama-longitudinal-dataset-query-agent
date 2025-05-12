@@ -70,3 +70,6 @@ Icon
 # Logs
 *.log
 logs/
+
+# idea
+.idea/*
