@@ -1,6 +1,12 @@
 import json
 import re
-from typing import List, Dict, Any, Optional
+import random
+import numpy as np
+import hashlib
+import os
+import pickle
+from datetime import datetime, timedelta
+from typing import List, Dict, Any, Optional, Tuple
 
 from langchain.prompts import PromptTemplate
 from langchain.output_parsers import PydanticOutputParser
@@ -10,7 +16,62 @@ from pydantic import BaseModel, Field
 from src.data_manager import DataManager
 # Local imports
 from src.data_models import QueryResult, UserQuery
-from src.utils import create_structured_context, format_filters_description
+from src.utils import create_structured_context, format_filters_description, normalize_query
+
+# Set fixed random seeds for deterministic behavior
+random.seed(42)
+np.random.seed(42)
+
+
+class CacheManager:
+    """Manages persistent caching to disk with expiration functionality."""
+
+    def __init__(self, cache_dir="./cache", expiration_days=7):
+        """
+        Initialize the cache manager.
+
+        Args:
+            cache_dir: Directory to store cache files
+            expiration_days: Number of days after which cache entries expire (0 for no expiration)
+        """
+        self.cache_dir = cache_dir
+        self.expiration_days = expiration_days
+        os.makedirs(cache_dir, exist_ok=True)
+
+    def get_cache_path(self, key):
+        """Get the file path for a cache key."""
+        return os.path.join(self.cache_dir, f"{key}.pickle")
+
+    def get(self, key):
+        """Retrieve a value from cache if it exists and isn't expired."""
+        path = self.get_cache_path(key)
+        if not os.path.exists(path):
+            return None
+
+        # Check for expiration
+        if self.expiration_days > 0:
+            modified_time = datetime.fromtimestamp(os.path.getmtime(path))
+            if datetime.now() - modified_time > timedelta(days=self.expiration_days):
+                os.remove(path)  # Remove expired cache
+                return None
+
+        try:
+            with open(path, 'rb') as f:
+                return pickle.load(f)
+        except Exception as e:
+            print(f"Cache retrieval error: {e}")
+            return None
+
+    def set(self, key, value):
+        """Store a value in the cache."""
+        path = self.get_cache_path(key)
+        try:
+            with open(path, 'wb') as f:
+                pickle.dump(value, f)
+            return True
+        except Exception as e:
+            print(f"Cache storage error: {e}")
+            return False
 
 
 # Intent analysis models
@@ -74,6 +135,16 @@ class QueryProcessor:
 
         # Initialize Ollama LLM
         self.llm = OllamaLLM(model=model_name)
+
+        # Initialize cache manager
+        self.cache_manager = CacheManager()
+
+        # Initialize memory caches
+        self._memory_cache = {
+            'intent': {},
+            'query': {},
+            'answer': {}
+        }
 
         # Initialize intent analysis chain
         self.intent_chain = self._create_intent_chain()
@@ -149,9 +220,30 @@ class QueryProcessor:
         # Create and return the chain (using LCEL pattern)
         return prompt | self.llm
 
+    def _get_cache_key(self, prefix: str, query: str, extra_data: Any = None) -> str:
+        """
+        Generate a consistent cache key using the query and optional extra data.
+
+        Args:
+            prefix: Cache key prefix
+            query: The user query
+            extra_data: Optional additional data to include in the key
+
+        Returns:
+            A unique cache key as string
+        """
+        # Create a normalized string from the query and extra data
+        if extra_data:
+            key_data = f"{normalize_query(query)}_{str(extra_data)}"
+        else:
+            key_data = normalize_query(query)
+
+        # Create MD5 hash
+        return f"{prefix}_{hashlib.md5(key_data.encode()).hexdigest()}"
+
     def analyze_intent(self, query: str) -> QueryIntent:
         """
-        Analyze the intent of a user query with improved error handling.
+        Analyze the intent of a user query with improved error handling and caching.
 
         Args:
             query: The user query string
@@ -159,13 +251,36 @@ class QueryProcessor:
         Returns:
             QueryIntent object with detected intent information
         """
+        # Normalize the query for consistent caching
+        normalized_query = normalize_query(query)
+
+        # Generate cache key
+        cache_key = self._get_cache_key('intent', normalized_query)
+
+        # Check memory cache first (fastest)
+        if cache_key in self._memory_cache['intent']:
+            print(f"Using memory cache for intent: {query}")
+            return self._memory_cache['intent'][cache_key]
+
+        # Then check disk cache
+        cached_intent = self.cache_manager.get(cache_key)
+        if cached_intent:
+            print(f"Using disk cache for intent: {query}")
+            # Also store in memory for faster access next time
+            self._memory_cache['intent'][cache_key] = cached_intent
+            return cached_intent
+
         try:
             # Get available metadata for context
             available_waves = self.data_manager.get_unique_values("wave")
             available_sections = self.data_manager.get_unique_values("section")
-            sample_variables = self.data_manager.df["variable_name"].sample(
-                min(20, len(self.data_manager.df))
-            ).tolist()
+
+            # Use deterministic sampling instead of random sampling
+            all_variables = self.data_manager.df["variable_name"].tolist()
+            # Sort to ensure consistent ordering
+            all_variables.sort()
+            # Take the first 20 (or fewer) elements predictably
+            sample_variables = all_variables[:min(20, len(all_variables))]
 
             # Create a more direct prompt to get just JSON (bypassing the chain)
             direct_template = """
@@ -230,6 +345,13 @@ class QueryProcessor:
 
                     # Create the QueryIntent object
                     intent = QueryIntent(**data)
+
+                    # Cache the intent in memory
+                    self._memory_cache['intent'][cache_key] = intent
+
+                    # Cache to disk as well
+                    self.cache_manager.set(cache_key, intent)
+
                     return intent
 
                 except json.JSONDecodeError as e:
@@ -264,7 +386,7 @@ class QueryProcessor:
             time_periods = wave_matches
 
         # Create fallback intent
-        return QueryIntent(
+        intent = QueryIntent(
             primary_intent=primary_intent,
             secondary_intent=None,
             filter_criteria={},
@@ -273,6 +395,12 @@ class QueryProcessor:
             analysis_type=None,
             confidence=0.6
         )
+
+        # Cache the fallback intent
+        self._memory_cache['intent'][cache_key] = intent
+        self.cache_manager.set(cache_key, intent)
+
+        return intent
 
     def find_relevant_questions(self, query: str, intent: QueryIntent, limit: int = 20) -> List[QueryResult]:
         """
@@ -287,6 +415,26 @@ class QueryProcessor:
         Returns:
             List of QueryResult objects
         """
+        # Create a cache key that includes the query and intent data
+        cache_key = self._get_cache_key(
+            'query',
+            query,
+            (intent.primary_intent, tuple(intent.target_variables), tuple(intent.time_periods), limit)
+        )
+
+        # Check memory cache first (fastest)
+        if cache_key in self._memory_cache['query']:
+            print(f"Using memory cache for query results: {query}")
+            return self._memory_cache['query'][cache_key]
+
+        # Then check disk cache
+        cached_results = self.cache_manager.get(cache_key)
+        if cached_results:
+            print(f"Using disk cache for query results: {query}")
+            # Also store in memory cache for faster access next time
+            self._memory_cache['query'][cache_key] = cached_results
+            return cached_results
+
         # Start with an empty list
         results = []
 
@@ -337,38 +485,38 @@ class QueryProcessor:
 
                 # Matching score calculation that considers phrase matches and term matches
                 if exact_phrase_match:
-                    # Direct phrase match (highest priority)
+                    # Direct phrase match (highest priority) - INCREASED THRESHOLD
                     exact_matches.append(
                         QueryResult(
                             question=question,
-                            similarity_score=0.95,
+                            similarity_score=0.98,  # Increased from 0.95
                             relevance_explanation=f"Direct match for query phrase in variable text"
                         )
                     )
                 elif match_ratio == 1.0:
-                    # All terms match but not as a complete phrase
+                    # All terms match but not as a complete phrase - INCREASED THRESHOLD
                     exact_matches.append(
                         QueryResult(
                             question=question,
-                            similarity_score=0.9,
+                            similarity_score=0.95,  # Increased from 0.9
                             relevance_explanation=f"All query terms found in variable text"
                         )
                     )
                 elif match_ratio >= 0.75:
-                    # Most terms match
+                    # Most terms match - INCREASED THRESHOLD
                     good_matches.append(
                         QueryResult(
                             question=question,
-                            similarity_score=0.85,
+                            similarity_score=0.88,  # Increased from 0.85
                             relevance_explanation=f"Most query terms found in variable text"
                         )
                     )
                 elif match_ratio >= 0.5:
-                    # Half or more terms match
+                    # Half or more terms match - INCREASED THRESHOLD
                     partial_matches.append(
                         QueryResult(
                             question=question,
-                            similarity_score=0.75,
+                            similarity_score=0.78,  # Increased from 0.75
                             relevance_explanation=f"Some query terms found in variable text"
                         )
                     )
@@ -399,7 +547,14 @@ class QueryProcessor:
         # Sort results by similarity score to ensure most relevant are first
         results.sort(key=lambda x: x.similarity_score, reverse=True)
 
-        return results[:limit]  # Return at most 'limit' results
+        # Limit the results
+        final_results = results[:limit]
+
+        # Cache the results
+        self._memory_cache['query'][cache_key] = final_results
+        self.cache_manager.set(cache_key, final_results)
+
+        return final_results  # Return at most 'limit' results
 
     def generate_answer(self, query: str, intent: QueryIntent, results: List[QueryResult]) -> str:
         """
@@ -414,23 +569,53 @@ class QueryProcessor:
         Returns:
             Generated answer text
         """
+        # Create a unique key for this specific combination of query, intent, and results
+        answer_key = self._get_cache_key(
+            'answer',
+            query,
+            (
+                intent.primary_intent,
+                tuple(intent.target_variables),
+                tuple(r.question.variable_name for r in results)
+            )
+        )
+
+        # Check memory cache first
+        if answer_key in self._memory_cache['answer']:
+            print(f"Using memory cache for answer: {query}")
+            return self._memory_cache['answer'][answer_key]
+
+        # Then check disk cache
+        cached_answer = self.cache_manager.get(answer_key)
+        if cached_answer:
+            print(f"Using disk cache for answer: {query}")
+            # Store in memory cache too
+            self._memory_cache['answer'][answer_key] = cached_answer
+            return cached_answer
+
         try:
             # Check if we have results
             if not results:
-                return "I couldn't find any survey questions related to your query. Please try rephrasing or being more specific about what you're looking for."
+                answer = "I couldn't find any survey questions related to your query. Please try rephrasing or being more specific about what you're looking for."
 
-            # Organize results into multiple tiers by relevance
-            exact_matches = []  # 0.9-1.0: Perfect or near-perfect matches
-            high_relevance = []  # 0.8-0.89: Very relevant
-            medium_relevance = []  # 0.7-0.79: Somewhat relevant
-            low_relevance = []  # Below 0.7: Limited relevance
+                # Cache the answer
+                self._memory_cache['answer'][answer_key] = answer
+                self.cache_manager.set(answer_key, answer)
+
+                return answer
+
+            # Organize results into multiple tiers by relevance - ADJUSTED THRESHOLDS
+            exact_matches = []  # 0.95-1.0: Perfect or near-perfect matches (increased from 0.9)
+            high_relevance = []  # 0.85-0.94: Very relevant (adjusted range)
+            medium_relevance = []  # 0.75-0.84: Somewhat relevant (adjusted range)
+            low_relevance = []  # Below 0.75: Limited relevance (adjusted threshold)
 
             for result in results:
-                if result.similarity_score >= 0.9:
+                if result.similarity_score >= 0.95:  # Increased from 0.9
                     exact_matches.append(result)
-                elif result.similarity_score >= 0.8:
+                elif result.similarity_score >= 0.85:  # Increased from 0.8
                     high_relevance.append(result)
-                elif result.similarity_score >= 0.7:
+                elif result.similarity_score >= 0.75:  # Increased from 0.7
                     medium_relevance.append(result)
                 else:
                     low_relevance.append(result)
@@ -539,12 +724,24 @@ class QueryProcessor:
                 response_parts.append("\n".join(suggestions))
 
             # Join all parts
-            return "\n".join(response_parts)
+            answer = "\n".join(response_parts)
+
+            # Cache the answer
+            self._memory_cache['answer'][answer_key] = answer
+            self.cache_manager.set(answer_key, answer)
+
+            return answer
 
         except Exception as e:
             print(f"Error in structured answer generation: {e}")
+            fallback_answer = f"I found {len(results)} variables related to your query about '{query}'. The most relevant ones include: " + \
+                              ", ".join([f"{r.question.variable_name} ({r.question.description})" for r in results[:3]])
 
-            # [Fallback logic remains the same]
+            # Cache the fallback answer
+            self._memory_cache['answer'][answer_key] = fallback_answer
+            self.cache_manager.set(answer_key, fallback_answer)
+
+            return fallback_answer
 
     def process_query(self, user_query: UserQuery) -> ProcessedQuery:
         """
@@ -620,7 +817,6 @@ class QueryProcessor:
                 context_used=[]
             )
 
-
     def explain_variable(self, variable_name: str) -> str:
         """
         Generate an explanation for a specific variable with error handling.
@@ -631,57 +827,23 @@ class QueryProcessor:
         Returns:
             Explanation text
         """
-        try:
-            # Get the question
-            question = self.data_manager.get_question_by_variable(variable_name)
+        # Create cache key for variable explanations
+        cache_key = self._get_cache_key('explain', variable_name)
 
-            if not question:
-                return f"Variable {variable_name} not found in the dataset."
+        # Check caches
+        if cache_key in self._memory_cache.get('explain', {}):
+            print(f"Using memory cache for explanation of {variable_name}")
+            return self._memory_cache.get('explain', {}).get(cache_key)
 
-            # Create context
-            context = create_structured_context(question)
-
-            # Prompt template
-            template = """
-                You are an AI assistant helping users understand survey data.
-    
-                VARIABLE: {variable_name}
-    
-                DETAILS:
-                {context}
-    
-                Provide a clear explanation of this survey variable, including:
-                1. What the question is measuring
-                2. The response options and their distribution
-                3. Any notable patterns in the responses
-                4. Potential significance of this variable in longitudinal research
-    
-                EXPLANATION:
-                """
-
-            prompt = PromptTemplate(
-                template=template,
-                input_variables=["variable_name", "context"]
-            )
-
-            # Create a one-off chain using LCEL pattern
-            chain = prompt | self.llm
-
-            # Generate and return explanation
-            return chain.invoke({
-                "variable_name": variable_name,
-                "context": context
-            })
-
-        except Exception as e:
-            print(f"Error in explain_variable: {e}")
-
-            # Fallback response
-            if question:
-                return f"Variable {variable_name} ({question.description}) from wave {question.wave} asks: '{question.question}'. The response data shows {len(question.response_items)} different response options."
-            else:
-                return f"Variable {variable_name} not found in the dataset. Please check the variable name and try again."
-
+        # Check disk cache
+        cached_explanation = self.cache_manager.get(cache_key)
+        if cached_explanation:
+            print(f"Using disk cache for explanation of {variable_name}")
+            # Ensure explain cache exists in memory
+            if 'explain' not in self._memory_cache:
+                self._memory_cache['explain'] = {}
+            self._memory_cache['explain'][cache_key] = cached_explanation
+            return cached_explanation
 
     def compare_waves(self, variable_name: str, waves: List[str]) -> str:
         """
@@ -694,6 +856,24 @@ class QueryProcessor:
         Returns:
             Comparison text
         """
+        # Create cache key based on variable name and waves
+        cache_key = self._get_cache_key('compare', variable_name, tuple(sorted(waves)))
+
+        # Check memory cache first
+        if 'compare' in self._memory_cache and cache_key in self._memory_cache['compare']:
+            print(f"Using memory cache for comparison of {variable_name} across waves")
+            return self._memory_cache['compare'][cache_key]
+
+        # Check disk cache
+        cached_comparison = self.cache_manager.get(cache_key)
+        if cached_comparison:
+            print(f"Using disk cache for comparison of {variable_name} across waves")
+            # Ensure compare cache exists in memory
+            if 'compare' not in self._memory_cache:
+                self._memory_cache['compare'] = {}
+            self._memory_cache['compare'][cache_key] = cached_comparison
+            return cached_comparison
+
         try:
             # Get questions across waves
             questions = []
@@ -707,10 +887,26 @@ class QueryProcessor:
                     questions.append(filtered[0])
 
             if not questions:
-                return f"Variable {variable_name} not found in the specified waves."
+                comparison = f"Variable {variable_name} not found in the specified waves."
+
+                # Cache the negative result
+                if 'compare' not in self._memory_cache:
+                    self._memory_cache['compare'] = {}
+                self._memory_cache['compare'][cache_key] = comparison
+                self.cache_manager.set(cache_key, comparison)
+
+                return comparison
 
             if len(questions) < 2:
-                return f"Variable {variable_name} was only found in {len(questions)} wave. At least 2 waves are needed for comparison."
+                comparison = f"Variable {variable_name} was only found in {len(questions)} wave. At least 2 waves are needed for comparison."
+
+                # Cache the insufficient result
+                if 'compare' not in self._memory_cache:
+                    self._memory_cache['compare'] = {}
+                self._memory_cache['compare'][cache_key] = comparison
+                self.cache_manager.set(cache_key, comparison)
+
+                return comparison
 
             # Create context for each question
             context_parts = []
@@ -723,18 +919,18 @@ class QueryProcessor:
             # Prompt template
             template = """
                 You are an AI assistant analyzing longitudinal survey data.
-    
+
                 TASK: Compare the variable {variable_name} across different waves.
-    
+
                 DATA:
                 {context}
-    
+
                 Provide a comparison analysis that includes:
                 1. Changes in response distributions over time
                 2. Notable trends or patterns
                 3. Possible explanations for any changes
                 4. Implications of these findings
-    
+
                 COMPARISON ANALYSIS:
                 """
 
@@ -747,23 +943,37 @@ class QueryProcessor:
             chain = prompt | self.llm
 
             # Generate and return comparison
-            return chain.invoke({
+            comparison = chain.invoke({
                 "variable_name": variable_name,
                 "context": context_text
             })
+
+            # Cache the result
+            if 'compare' not in self._memory_cache:
+                self._memory_cache['compare'] = {}
+            self._memory_cache['compare'][cache_key] = comparison
+            self.cache_manager.set(cache_key, comparison)
+
+            return comparison
 
         except Exception as e:
             print(f"Error in compare_waves: {e}")
 
             # Fallback response
             if questions:
-                response = f"Comparing variable {variable_name} across {len(questions)} waves:\n\n"
+                fallback = f"Comparing variable {variable_name} across {len(questions)} waves:\n\n"
 
                 for q in questions:
-                    response += f"- Wave {q.wave}: {q.description}\n"
-                    response += f"  Question: {q.question}\n"
-                    response += f"  Response options: {len(q.response_items)}\n\n"
-
-                return response
+                    fallback += f"- Wave {q.wave}: {q.description}\n"
+                    fallback += f"  Question: {q.question}\n"
+                    fallback += f"  Response options: {len(q.response_items)}\n\n"
             else:
-                return f"Variable {variable_name} not found in the specified waves. Please check the variable name and waves and try again."
+                fallback = f"Variable {variable_name} not found in the specified waves. Please check the variable name and waves and try again."
+
+            # Cache the fallback response
+            if 'compare' not in self._memory_cache:
+                self._memory_cache['compare'] = {}
+            self._memory_cache['compare'][cache_key] = fallback
+            self.cache_manager.set(cache_key, fallback)
+
+            return fallback

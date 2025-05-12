@@ -30,6 +30,55 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
+def normalize_query(query: str) -> str:
+    """
+    Normalize a query string to improve cache hit rates.
+
+    Normalization steps:
+    1. Convert to lowercase
+    2. Remove extra whitespace
+    3. Remove punctuation
+    4. Standardize word forms (like "sad", "sadness" → similar forms)
+
+    Args:
+        query: Original query string
+
+    Returns:
+        Normalized query string
+    """
+    import re
+
+    # Lowercase and strip whitespace
+    query = query.lower().strip()
+
+    # Remove punctuation and extra spaces
+    query = re.sub(r'[^\w\s]', ' ', query)
+    query = re.sub(r'\s+', ' ', query)
+
+    # Optional: Use stemming or lemmatization for word normalization
+    # This requires nltk to be installed:
+    # try:
+    #     from nltk.stem import PorterStemmer
+    #     stemmer = PorterStemmer()
+    #     words = query.split()
+    #     words = [stemmer.stem(word) for word in words]
+    #     query = ' '.join(words)
+    # except ImportError:
+    #     pass  # Skip stemming if nltk is not available
+
+    # Remove common words that don't affect meaning
+    stop_words = {'a', 'an', 'the', 'and', 'or', 'but', 'about', 'for', 'of', 'in', 'to', 'with'}
+    words = query.split()
+    words = [word for word in words if word not in stop_words]
+
+    # Sort words for order independence (optional)
+    # Enabling this would treat "depression symptoms" and "symptoms of depression" as the same query
+    # words.sort()
+
+    # Join back into a string
+    return ' '.join(words)
+
+
 def format_response_summary(responses: List[SurveyResponse]) -> str:
     """
     Create a readable summary of response options and counts.

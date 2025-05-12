@@ -1,4 +1,5 @@
 import re
+import uuid
 import pandas as pd
 import streamlit as st
 
@@ -53,14 +54,20 @@ def initialize_system():
             with st.spinner("First-time setup: Embedding survey data..."):
                 data_manager.embed_and_store()
 
+        # Create cache manager and assign to data manager
+        from src.query_processor import CacheManager
+        cache_manager = CacheManager(cache_dir="./cache", expiration_days=7)
+        data_manager.cache_manager = cache_manager
+
         # Store in session state
         st.session_state.data_manager = data_manager
 
-        # Initialize query processor
+        # Initialize query processor with cache manager
         query_processor = QueryProcessor(
             data_manager=data_manager,
             model_name=MODEL_NAME
         )
+        query_processor.cache_manager = cache_manager
         st.session_state.query_processor = query_processor
 
         # Store metadata
@@ -201,6 +208,10 @@ def chat_interface():
         st.info("Please initialize the system using the sidebar.")
         return
 
+    # Initialize a unique conversation ID if not already set
+    if 'conversation_id' not in st.session_state:
+        st.session_state.conversation_id = str(uuid.uuid4())[:8]
+
     # Chat container
     chat_container = st.container()
 
@@ -212,7 +223,7 @@ def chat_interface():
 
     # Display chat history
     with chat_container:
-        for message in st.session_state.chat_history:
+        for message_idx, message in enumerate(st.session_state.chat_history):
             if message["role"] == "user":
                 with st.chat_message("user"):
                     st.markdown(message["content"])
@@ -236,10 +247,9 @@ def chat_interface():
                                     st.caption(f"Similarity: {result.similarity_score:.2f}")
                                     st.markdown(result.question.question)
 
-                                    # Button to show details with a unique key
-                                    # Use both the message index and result index to ensure uniqueness
-                                    message_idx = st.session_state.chat_history.index(message)
-                                    btn_key = f"btn_msg{message_idx}_result{i}_{result.question.variable_name}"
+                                    # Button to show details with a guaranteed unique key
+                                    # Use conversation_id, message_idx, and result variable_name
+                                    btn_key = f"btn_{st.session_state.conversation_id}_{message_idx}_{i}_{result.question.variable_name}"
                                     if st.button("Show Details", key=btn_key):
                                         st.session_state.selected_question = result.question
 

@@ -1,5 +1,7 @@
 import json
 import uuid
+import hashlib
+import numpy as np
 from typing import List, Dict, Any, Optional
 
 # External dependencies
@@ -12,7 +14,7 @@ from pydantic import ValidationError
 
 # Local imports
 from src.data_models import SurveyData, SurveyQuestion, EmbeddingRecord, QueryResult
-from src.utils import clean_text, format_response_summary
+from src.utils import clean_text, format_response_summary, normalize_query
 
 
 class DataManager:
@@ -50,6 +52,12 @@ class DataManager:
         self.vector_db = None
         self.chroma_client = None
         self.collection = None
+
+        # Cache for vector searches
+        self._vector_search_cache = {}
+
+        # Cache manager will be assigned externally if needed
+        self.cache_manager = None
 
     def load_data(self) -> SurveyData:
         """Load survey data from JSON file."""
@@ -105,6 +113,9 @@ class DataManager:
         """Initialize ChromaDB and embedding model."""
         # Initialize embeddings
         try:
+            # Set fixed random seed for deterministic behavior
+            np.random.seed(42)
+
             # Initialize Nomic embeddings via Ollama
             self.embedding_client = OllamaEmbeddings(model=self.embeddings_model)
 
@@ -200,6 +211,9 @@ class DataManager:
         if self.vector_db is None:
             raise ValueError("Vector DB not initialized. Call initialize_vector_db() first.")
 
+        # Use fixed random seed for embedding consistency
+        np.random.seed(42)
+
         # Prepare records
         embedding_records = self.prepare_embedding_records()
 
@@ -237,6 +251,21 @@ class DataManager:
 
         print(f"Successfully embedded and stored {total_records} records")
 
+    def _get_cache_key(self, prefix, query_text, filters=None, limit=5):
+        """Create a consistent cache key for vector searches."""
+        # Normalize the query for consistent caching
+        normalized_query = normalize_query(query_text)
+        # Include filters and limit in the key
+        if filters:
+            filters_str = str(sorted([(k, v) for k, v in filters.items()]))
+        else:
+            filters_str = "None"
+
+        # Create the full key string
+        key_str = f"{normalized_query}_{filters_str}_{limit}"
+        # Hash it for shorter keys
+        return f"{prefix}_{hashlib.md5(key_str.encode()).hexdigest()}"
+
     def query_similar(self,
                       query_text: str,
                       filters: Dict[str, Any] = None,
@@ -254,6 +283,26 @@ class DataManager:
         """
         if self.vector_db is None:
             raise ValueError("Vector DB not initialized. Call initialize_vector_db() first.")
+
+        # Create a cache key
+        cache_key = self._get_cache_key("vector_search", query_text, filters, limit)
+
+        # Check in-memory cache first (fastest)
+        if cache_key in self._vector_search_cache:
+            print(f"Using memory cache for vector search: {query_text}")
+            return self._vector_search_cache[cache_key]
+
+        # Check disk cache if available
+        if self.cache_manager:
+            cached_results = self.cache_manager.get(cache_key)
+            if cached_results:
+                print(f"Using disk cache for vector search: {query_text}")
+                # Also store in memory cache for faster future access
+                self._vector_search_cache[cache_key] = cached_results
+                return cached_results
+
+        # Set fixed random seed before query for deterministic results
+        np.random.seed(42)
 
         # Perform the similarity search
         results = self.vector_db.similarity_search_with_score(
@@ -285,6 +334,13 @@ class DataManager:
                     relevance_explanation=f"This question about '{question.description}' is similar to your query."
                 )
                 query_results.append(result)
+
+        # Cache results in memory
+        self._vector_search_cache[cache_key] = query_results
+
+        # Cache to disk if available
+        if self.cache_manager:
+            self.cache_manager.set(cache_key, query_results)
 
         return query_results
 
