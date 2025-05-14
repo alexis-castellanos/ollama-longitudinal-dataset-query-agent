@@ -266,6 +266,8 @@ class DataManager:
         # Hash it for shorter keys
         return f"{prefix}_{hashlib.md5(key_str.encode()).hexdigest()}"
 
+ 
+
     def query_similar(self,
                     query_text: str,
                     filters: Dict[str, Any] = None,
@@ -304,32 +306,46 @@ class DataManager:
         # Set fixed random seed before query for deterministic results
         np.random.seed(42)
 
-        # IMPORTANT FIX: Convert list filters to proper ChromaDB filter format
-        chroma_filters = {}
-        if filters:
+        # Convert filters for ChromaDB
+        chroma_filters = None
+        if filters and "wave" in filters and isinstance(filters["wave"], list):
+            # ChromaDB expects a different structure for list filters
+            wave_list = filters["wave"]
+            
+            # Ensure proper wave format with " Core" suffix
+            formatted_waves = []
+            for wave in wave_list:
+                if isinstance(wave, str) and " Core" not in wave:
+                    formatted_waves.append(f"{wave} Core")
+                else:
+                    formatted_waves.append(wave)
+            
+            # Create OR conditions for each wave
+            chroma_filters = {"$or": []}
+            for wave in formatted_waves:
+                chroma_filters["$or"].append({"wave": {"$eq": wave}})
+            
+            print(f"Using ChromaDB OR filter for waves: {formatted_waves}")
+        elif filters:
+            # For other filters, just ensure wave formatting if present
+            chroma_filters = {}
             for key, value in filters.items():
-                if isinstance(value, list):
-                    if key == "wave":
-                        # ChromaDB expects "$in" operator for list values
-                        chroma_filters = {"$or": []}
-                        for wave in value:
-                            # Ensure proper wave format with " Core" suffix if not already present
-                            if " Core" not in wave:
-                                wave = f"{wave} Core"
-                            chroma_filters["$or"].append({"wave": {"$eq": wave}})
+                if key == "wave" and isinstance(value, str) and " Core" not in value:
+                    chroma_filters[key] = f"{value} Core"
                 else:
                     chroma_filters[key] = value
 
         try:
-            # Perform the similarity search with modified filters
+            # Perform the similarity search with appropriate filters
             if chroma_filters:
-                print(f"Using ChromaDB filters: {chroma_filters}")
+                print(f"Executing vector search with filters: {chroma_filters}")
                 results = self.vector_db.similarity_search_with_score(
                     query=query_text,
                     k=limit,
                     filter=chroma_filters
                 )
             else:
+                # No filters
                 results = self.vector_db.similarity_search_with_score(
                     query=query_text,
                     k=limit
@@ -367,7 +383,7 @@ class DataManager:
                 self.cache_manager.set(cache_key, query_results)
 
             return query_results
-        
+    
         except Exception as e:
             print(f"Error in vector search: {e}")
             # Fallback to a simpler approach - no filtering
@@ -401,16 +417,19 @@ class DataManager:
             except Exception as e2:
                 print(f"Error in fallback search: {e2}")
                 return []
+       
 
     def filter_questions(self,
                         filters: Dict[str, Any] = None,
-                        limit: int = 100) -> List[SurveyQuestion]:
+                        limit: int = 100,
+                        balanced: bool = True) -> List[SurveyQuestion]:
         """
         Filter questions based on metadata criteria.
 
         Args:
             filters: Dictionary of filter criteria
             limit: Maximum number of results
+            balanced: If True, retrieve balanced samples from each wave
 
         Returns:
             List of SurveyQuestion objects
@@ -426,7 +445,7 @@ class DataManager:
             for key, value in filters.items():
                 if key in filtered_df.columns:
                     if isinstance(value, list):
-                        # IMPORTANT FIX: For wave filtering, ensure proper format with " Core" suffix
+                        # For wave filtering, ensure proper format with " Core" suffix
                         if key == "wave":
                             # Make sure values have " Core" suffix if needed
                             formatted_values = []
@@ -444,8 +463,49 @@ class DataManager:
                             value = f"{value} Core"
                         filtered_df = filtered_df[filtered_df[key] == value]
 
-        # Limit results
-        filtered_df = filtered_df.head(limit)
+        # Get balanced results if requested
+        if balanced and "wave" in filtered_df.columns and limit is not None:
+            # Group by wave
+            wave_groups = filtered_df.groupby("wave")
+            
+            # Calculate how many samples per wave
+            num_waves = len(wave_groups)
+            if num_waves == 0:
+                return []
+                
+            samples_per_wave = max(1, limit // num_waves)
+            print(f"Balanced sampling: {samples_per_wave} samples per wave from {num_waves} waves")
+            
+            # Sample from each wave
+            result_df = pd.DataFrame()
+            for wave, group in wave_groups:
+                if len(group) > 0:
+                    # If group is smaller than samples_per_wave, take all; otherwise sample
+                    if len(group) <= samples_per_wave:
+                        wave_sample = group
+                    else:
+                        # Use random seed for deterministic sampling
+                        np.random.seed(42)
+                        wave_sample = group.sample(samples_per_wave)
+                    
+                    print(f"Sampled {len(wave_sample)} questions from wave {wave}")
+                    result_df = pd.concat([result_df, wave_sample])
+                
+            # If we have fewer than limit, add more samples randomly
+            if len(result_df) < limit and len(filtered_df) > len(result_df):
+                remaining = limit - len(result_df)
+                # Exclude rows already in result_df
+                remaining_df = filtered_df[~filtered_df.index.isin(result_df.index)]
+                if len(remaining_df) > 0:
+                    np.random.seed(42)  # For deterministic sampling
+                    additional = remaining_df.sample(min(remaining, len(remaining_df)))
+                    result_df = pd.concat([result_df, additional])
+                    print(f"Added {len(additional)} additional samples to reach limit")
+                    
+            filtered_df = result_df
+        elif limit is not None:
+            # Apply standard limit if not using balanced sampling
+            filtered_df = filtered_df.head(limit)
 
         # Convert back to SurveyQuestion objects
         result_questions = []

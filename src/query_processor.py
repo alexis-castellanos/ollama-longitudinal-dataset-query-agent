@@ -505,12 +505,17 @@ class QueryProcessor:
 
         # Apply filters from intent, including time periods
         filters = {}
-        
+
         # IMPORTANT FIX: Add time_periods to filters if present
         if intent.time_periods:
             print(f"Filtering by time periods: {intent.time_periods}")
             filters["wave"] = intent.time_periods
-        
+        else:
+            # Use all available waves if none specified
+            available_waves = self.data_manager.get_unique_values("wave")
+            print(f"No time periods specified, using all available waves: {available_waves}")
+            filters["wave"] = available_waves
+
         # Check if there are any other filter criteria in the intent
         if intent.filter_criteria:
             # Merge with existing filters
@@ -521,7 +526,12 @@ class QueryProcessor:
         # Get a larger set of questions to search through
         try:
             # IMPORTANT FIX: Pass filters to filter_questions to apply the time period filter
-            all_questions = self.data_manager.filter_questions(filters=filters, limit=500)
+            # and use balanced sampling with a higher limit
+            all_questions = self.data_manager.filter_questions(
+                filters=filters, 
+                limit=1000,  # Increased from 500
+                balanced=True
+            )
             print(f"Retrieved {len(all_questions)} questions after filtering")
 
             # Prioritize direct keyword matches with categorization
@@ -842,7 +852,7 @@ class QueryProcessor:
 
             print(f"Intent analyzed: {intent}")
 
-            # Find relevant questions
+            # Find relevant questions with balanced sampling
             results = self.find_relevant_questions(
                 query=user_query.query_text,
                 intent=intent,
@@ -852,13 +862,27 @@ class QueryProcessor:
             # If no results found through intent analysis, try direct semantic search
             if not results:
                 try:
+                    # Get all available waves for complete search
+                    available_waves = self.data_manager.get_unique_values("wave")
+                    wave_filter = {"wave": available_waves}
+                    
+                    # Create ChromaDB compatible filter
+                    chroma_filter = {"$or": []}
+                    for wave in available_waves:
+                        chroma_filter["$or"].append({"wave": {"$eq": wave}})
+                    
+                    # Try semantic search with wave filter
                     results = self.data_manager.query_similar(
                         query_text=user_query.query_text,
-                        filters={},
+                        filters=chroma_filter,  # Use ChromaDB compatible filter
                         limit=user_query.limit
                     )
+                    
+                    print(f"Fallback semantic search found {len(results)} results")
                 except Exception as e:
                     print(f"Error in fallback semantic search: {e}")
+
+      
 
             # Generate answer
             if results:
