@@ -22,8 +22,8 @@ MODEL_NAME = "granite3-dense:8b"
 #MODEL_NAME ="llama3-chatqa:latest"
 #MODEL_NAME ="mistral-nemo:latest"
 
-#EMBEDDING_MODEL = "nomic-embed-text:latest"
-EMBEDDING_MODEL ="all-minilm:l12-v2"
+EMBEDDING_MODEL = "nomic-embed-text:latest"
+#EMBEDDING_MODEL ="all-minilm:l12-v2"
 DATA_PATH = "data/hrs_data.json"
 
 # Session state initialization
