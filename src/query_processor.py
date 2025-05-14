@@ -241,6 +241,7 @@ class QueryProcessor:
         # Create MD5 hash
         return f"{prefix}_{hashlib.md5(key_data.encode()).hexdigest()}"
 
+        
     def analyze_intent(self, query: str) -> QueryIntent:
         """
         Analyze the intent of a user query with improved error handling and caching.
@@ -342,6 +343,37 @@ class QueryProcessor:
                             if isinstance(var, dict) and "name" in var:
                                 # Replace the dictionary with just the name string
                                 data["target_variables"][i] = var["name"]
+                    
+                    # IMPORTANT FIX: Handle time_periods in dictionary format
+                    if "time_periods" in data and isinstance(data["time_periods"], list):
+                        processed_time_periods = []
+                        for period in data["time_periods"]:
+                            if isinstance(period, dict):
+                                # Handle dictionary format (e.g., {"start_date": 2004, "end_date": 2008})
+                                if "start_date" in period and "end_date" in period:
+                                    start_year = period["start_date"]
+                                    end_year = period["end_date"]
+                                    
+                                    # Generate individual year strings for each year in the range
+                                    for year in range(start_year, end_year + 1, 2):  # Assuming years increment by 2
+                                        if year <= 2018:  # Ensure we don't go beyond available data
+                                            processed_time_periods.append(f"{year} Core")
+                                elif "year" in period:
+                                    # Handle single year dictionaries
+                                    processed_time_periods.append(f"{period['year']} Core")
+                            elif isinstance(period, str):
+                                # Handle already correctly formatted strings
+                                if " Core" not in period and period.isdigit():
+                                    processed_time_periods.append(f"{period} Core")
+                                else:
+                                    processed_time_periods.append(period)
+                            elif isinstance(period, int):
+                                # Handle plain year numbers
+                                processed_time_periods.append(f"{period} Core")
+                        
+                        # Replace the time_periods with our processed list
+                        data["time_periods"] = processed_time_periods
+                        print(f"Processed time periods: {processed_time_periods}")
 
                     # Create the QueryIntent object
                     intent = QueryIntent(**data)
@@ -380,10 +412,22 @@ class QueryProcessor:
 
         # Extract any mentioned time periods (if waves are numeric)
         time_periods = []
-        wave_pattern = r'\bwave\s+(\d+|[ivxlcdm]+)\b'
-        wave_matches = re.findall(wave_pattern, query.lower())
-        if wave_matches:
-            time_periods = wave_matches
+        wave_pattern = r'\b(\d{4})\b'  # Look for 4-digit years
+        wave_matches = re.findall(wave_pattern, query)
+        
+        # Format wave matches with " Core" suffix
+        for year in wave_matches:
+            time_periods.append(f"{year} Core")
+        
+        # Also check for "wave X" mentions
+        wave_mention_pattern = r'\bwave\s+(\d+|[ivxlcdm]+)\b'
+        wave_mention_matches = re.findall(wave_mention_pattern, query.lower())
+        
+        # Try to map these to years if possible
+        for wave_num in wave_mention_matches:
+            # For now, just add as is (better handling could be added)
+            if wave_num not in time_periods:
+                time_periods.append(wave_num)
 
         # Create fallback intent
         intent = QueryIntent(
@@ -459,12 +503,26 @@ class QueryProcessor:
                         )
                     )
 
-        # Apply filters from intent
+        # Apply filters from intent, including time periods
         filters = {}
+        
+        # IMPORTANT FIX: Add time_periods to filters if present
+        if intent.time_periods:
+            print(f"Filtering by time periods: {intent.time_periods}")
+            filters["wave"] = intent.time_periods
+        
+        # Check if there are any other filter criteria in the intent
+        if intent.filter_criteria:
+            # Merge with existing filters
+            filters.update(intent.filter_criteria)
+            
+        print(f"Applied filters: {filters}")
 
         # Get a larger set of questions to search through
         try:
-            all_questions = self.data_manager.filter_questions(limit=500)
+            # IMPORTANT FIX: Pass filters to filter_questions to apply the time period filter
+            all_questions = self.data_manager.filter_questions(filters=filters, limit=500)
+            print(f"Retrieved {len(all_questions)} questions after filtering")
 
             # Prioritize direct keyword matches with categorization
             exact_matches = []  # For perfect or near-perfect matches
@@ -543,12 +601,37 @@ class QueryProcessor:
         if len(results) < limit:
             remaining = limit - len(results)
             existing_vars = {result.question.variable_name for result in results}
+            
+            try:
+                # IMPORTANT FIX: Also pass filters to semantic search for consistency
+                semantic_results = self.data_manager.query_similar(
+                    query_text=query,
+                    filters=filters,  # Pass the filters including time_periods
+                    limit=remaining
+                )
+                
+                # Filter out variables we already have
+                for result in semantic_results:
+                    if result.question.variable_name not in existing_vars:
+                        results.append(result)
+                        existing_vars.add(result.question.variable_name)
+                        
+                print(f"Added {len(semantic_results)} results from semantic search")
+            except Exception as e:
+                print(f"Error in semantic search: {e}")
 
         # Sort results by similarity score to ensure most relevant are first
         results.sort(key=lambda x: x.similarity_score, reverse=True)
 
         # Limit the results
         final_results = results[:limit]
+        
+        # Debug: Print distribution of waves in results
+        wave_distribution = {}
+        for result in final_results:
+            wave = result.question.wave
+            wave_distribution[wave] = wave_distribution.get(wave, 0) + 1
+        print(f"Wave distribution in results: {wave_distribution}")
 
         # Cache the results
         self._memory_cache['query'][cache_key] = final_results

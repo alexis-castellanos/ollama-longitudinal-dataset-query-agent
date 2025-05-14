@@ -267,9 +267,9 @@ class DataManager:
         return f"{prefix}_{hashlib.md5(key_str.encode()).hexdigest()}"
 
     def query_similar(self,
-                      query_text: str,
-                      filters: Dict[str, Any] = None,
-                      limit: int = 5) -> List[QueryResult]:
+                    query_text: str,
+                    filters: Dict[str, Any] = None,
+                    limit: int = 5) -> List[QueryResult]:
         """
         Query the vector database for similar questions.
 
@@ -304,49 +304,107 @@ class DataManager:
         # Set fixed random seed before query for deterministic results
         np.random.seed(42)
 
-        # Perform the similarity search
-        results = self.vector_db.similarity_search_with_score(
-            query=query_text,
-            k=limit,
-            filter=filters
-        )
+        # IMPORTANT FIX: Convert list filters to proper ChromaDB filter format
+        chroma_filters = {}
+        if filters:
+            for key, value in filters.items():
+                if isinstance(value, list):
+                    if key == "wave":
+                        # ChromaDB expects "$in" operator for list values
+                        chroma_filters = {"$or": []}
+                        for wave in value:
+                            # Ensure proper wave format with " Core" suffix if not already present
+                            if " Core" not in wave:
+                                wave = f"{wave} Core"
+                            chroma_filters["$or"].append({"wave": {"$eq": wave}})
+                else:
+                    chroma_filters[key] = value
 
-        # Process results
-        query_results = []
-        for doc, score in results:
-            # Extract the question ID from metadata
-            metadata = doc.metadata
-            variable_name = metadata.get("variable_name")
-
-            # Find the corresponding survey question
-            question = next(
-                (q for q in self.survey_data.questions if q.variable_name == variable_name),
-                None
-            )
-
-            if question:
-                # Convert similarity score (lower is better) to 0-1 scale (higher is better)
-                normalized_score = 1.0 - min(score, 1.0)
-
-                result = QueryResult(
-                    question=question,
-                    similarity_score=normalized_score,
-                    relevance_explanation=f"This question about '{question.description}' is similar to your query."
+        try:
+            # Perform the similarity search with modified filters
+            if chroma_filters:
+                print(f"Using ChromaDB filters: {chroma_filters}")
+                results = self.vector_db.similarity_search_with_score(
+                    query=query_text,
+                    k=limit,
+                    filter=chroma_filters
                 )
-                query_results.append(result)
+            else:
+                results = self.vector_db.similarity_search_with_score(
+                    query=query_text,
+                    k=limit
+                )
 
-        # Cache results in memory
-        self._vector_search_cache[cache_key] = query_results
+            # Process results
+            query_results = []
+            for doc, score in results:
+                # Extract the question ID from metadata
+                metadata = doc.metadata
+                variable_name = metadata.get("variable_name")
 
-        # Cache to disk if available
-        if self.cache_manager:
-            self.cache_manager.set(cache_key, query_results)
+                # Find the corresponding survey question
+                question = next(
+                    (q for q in self.survey_data.questions if q.variable_name == variable_name),
+                    None
+                )
 
-        return query_results
+                if question:
+                    # Convert similarity score (lower is better) to 0-1 scale (higher is better)
+                    normalized_score = 1.0 - min(score, 1.0)
+
+                    result = QueryResult(
+                        question=question,
+                        similarity_score=normalized_score,
+                        relevance_explanation=f"This question about '{question.description}' is similar to your query."
+                    )
+                    query_results.append(result)
+
+            # Cache results in memory
+            self._vector_search_cache[cache_key] = query_results
+
+            # Cache to disk if available
+            if self.cache_manager:
+                self.cache_manager.set(cache_key, query_results)
+
+            return query_results
+        
+        except Exception as e:
+            print(f"Error in vector search: {e}")
+            # Fallback to a simpler approach - no filtering
+            try:
+                print("Trying fallback search without filters")
+                results = self.vector_db.similarity_search_with_score(
+                    query=query_text,
+                    k=limit
+                )
+                
+                # Process results (same as above)
+                query_results = []
+                for doc, score in results:
+                    metadata = doc.metadata
+                    variable_name = metadata.get("variable_name")
+                    question = next(
+                        (q for q in self.survey_data.questions if q.variable_name == variable_name),
+                        None
+                    )
+                    if question:
+                        normalized_score = 1.0 - min(score, 1.0)
+                        result = QueryResult(
+                            question=question,
+                            similarity_score=normalized_score,
+                            relevance_explanation=f"This question about '{question.description}' is similar to your query."
+                        )
+                        query_results.append(result)
+                        
+                return query_results
+                
+            except Exception as e2:
+                print(f"Error in fallback search: {e2}")
+                return []
 
     def filter_questions(self,
-                         filters: Dict[str, Any] = None,
-                         limit: int = 100) -> List[SurveyQuestion]:
+                        filters: Dict[str, Any] = None,
+                        limit: int = 100) -> List[SurveyQuestion]:
         """
         Filter questions based on metadata criteria.
 
@@ -368,8 +426,22 @@ class DataManager:
             for key, value in filters.items():
                 if key in filtered_df.columns:
                     if isinstance(value, list):
-                        filtered_df = filtered_df[filtered_df[key].isin(value)]
+                        # IMPORTANT FIX: For wave filtering, ensure proper format with " Core" suffix
+                        if key == "wave":
+                            # Make sure values have " Core" suffix if needed
+                            formatted_values = []
+                            for item in value:
+                                if isinstance(item, str) and " Core" not in item:
+                                    formatted_values.append(f"{item} Core")
+                                else:
+                                    formatted_values.append(item)
+                            filtered_df = filtered_df[filtered_df[key].isin(formatted_values)]
+                        else:
+                            filtered_df = filtered_df[filtered_df[key].isin(value)]
                     else:
+                        # For single values, also handle formatting for wave
+                        if key == "wave" and isinstance(value, str) and " Core" not in value:
+                            value = f"{value} Core"
                         filtered_df = filtered_df[filtered_df[key] == value]
 
         # Limit results
