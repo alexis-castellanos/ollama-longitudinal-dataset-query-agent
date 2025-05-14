@@ -17,8 +17,13 @@ st.set_page_config(
 )
 
 # Constants
-MODEL_NAME = "llama3.2:latest"
-EMBEDDING_MODEL = "nomic-embed-text:latest"
+MODEL_NAME = "granite3-dense:8b"
+#MODEL_NAME ="deepseek-r1:8b"
+#MODEL_NAME ="llama3-chatqa:latest"
+#MODEL_NAME ="mistral-nemo:latest"
+
+#EMBEDDING_MODEL = "nomic-embed-text:latest"
+EMBEDDING_MODEL ="all-minilm:l12-v2"
 DATA_PATH = "data/hrs_data.json"
 
 # Session state initialization

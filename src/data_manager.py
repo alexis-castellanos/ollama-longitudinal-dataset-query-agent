@@ -4,17 +4,18 @@ import hashlib
 import numpy as np
 from typing import List, Dict, Any, Optional
 
-# External dependencies
+# Updated imports using newer package structure
 import chromadb
 import pandas as pd
 from chromadb.config import Settings
-from langchain_community.embeddings import OllamaEmbeddings
-from langchain_community.vectorstores import Chroma
+from langchain_ollama import OllamaEmbeddings  # Updated import
+from langchain_chroma import Chroma  # Updated import
 from pydantic import ValidationError
 
 # Local imports
 from src.data_models import SurveyData, SurveyQuestion, EmbeddingRecord, QueryResult
 from src.utils import clean_text, format_response_summary, normalize_query
+
 
 
 class DataManager:
@@ -108,7 +109,7 @@ class DataManager:
             records.append(record)
 
         return pd.DataFrame(records)
-
+    
     def initialize_vector_db(self):
         """Initialize ChromaDB and embedding model."""
         # Initialize embeddings
@@ -116,8 +117,11 @@ class DataManager:
             # Set fixed random seed for deterministic behavior
             np.random.seed(42)
 
-            # Initialize Nomic embeddings via Ollama
-            self.embedding_client = OllamaEmbeddings(model=self.embeddings_model)
+            # Initialize embeddings using updated import path
+            self.embedding_client = OllamaEmbeddings(
+                model=self.embeddings_model,
+                base_url="http://localhost:11434"  # Explicitly set base URL
+            )
 
             # Initialize ChromaDB
             self.chroma_client = chromadb.PersistentClient(
@@ -159,7 +163,7 @@ class DataManager:
                 print(f"Fatal error with ChromaDB: {str(e)}")
                 raise
 
-            # Initialize LangChain's Chroma wrapper for easier querying
+            # Initialize LangChain's Chroma wrapper with updated import
             self.vector_db = Chroma(
                 client=self.chroma_client,
                 collection_name=self.collection_name,
@@ -171,6 +175,8 @@ class DataManager:
         except Exception as e:
             print(f"Error initializing vector database: {str(e)}")
             raise
+
+    # The rest of the class remains the same...
 
     def prepare_embedding_records(self) -> List[EmbeddingRecord]:
         """Prepare records for embedding."""
