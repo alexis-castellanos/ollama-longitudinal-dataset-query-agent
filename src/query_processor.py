@@ -402,51 +402,35 @@ class QueryProcessor:
 
         return intent
 
+    # Update the find_relevant_questions method in QueryProcessor class
+
     def find_relevant_questions(self, query: str, intent: QueryIntent, limit: int = 20) -> List[QueryResult]:
         """
-        Find relevant survey questions based on query and intent with better handling
-        for larger result sets.
-
-        Args:
-            query: The original user query
-            intent: The analyzed query intent
-            limit: Maximum number of results to return (default increased to 20)
-
-        Returns:
-            List of QueryResult objects
+        Find relevant survey questions based on query and intent using hybrid search.
         """
-        # Create a cache key that includes the query and intent data
+        # Create a cache key
         cache_key = self._get_cache_key(
             'query',
             query,
             (intent.primary_intent, tuple(intent.target_variables), tuple(intent.time_periods), limit)
         )
 
-        # Check memory cache first (fastest)
+        # Check memory cache
         if cache_key in self._memory_cache['query']:
             print(f"Using memory cache for query results: {query}")
             return self._memory_cache['query'][cache_key]
 
-        # Then check disk cache
+        # Check disk cache
         cached_results = self.cache_manager.get(cache_key)
         if cached_results:
             print(f"Using disk cache for query results: {query}")
-            # Also store in memory cache for faster access next time
             self._memory_cache['query'][cache_key] = cached_results
             return cached_results
 
         # Start with an empty list
         results = []
 
-        # Convert query to lowercase for case-insensitive matching
-        query_lower = query.lower()
-        query_terms = re.findall(r'\b\w+\b', query_lower)
-
-        # Skip single-word general terms that might match too many variables
-        if len(query_terms) == 1 and query_terms[0] in ['variable', 'question', 'survey', 'data']:
-            query_terms = []
-
-        # If specific variables were mentioned, prioritize those
+        # First handle exact variable matches
         if intent.target_variables:
             for var_name in intent.target_variables:
                 question = self.data_manager.get_question_by_variable(var_name)
@@ -454,107 +438,75 @@ class QueryProcessor:
                     results.append(
                         QueryResult(
                             question=question,
-                            similarity_score=1.0,  # Perfect match
+                            similarity_score=1.0,
                             relevance_explanation=f"Exact match for requested variable {var_name}"
                         )
                     )
 
-        # Apply filters from intent
-        filters = {}
-
-        # Get a larger set of questions to search through
-        try:
-            all_questions = self.data_manager.filter_questions(limit=500)
-
-            # Prioritize direct keyword matches with categorization
-            exact_matches = []  # For perfect or near-perfect matches
-            good_matches = []  # For good but not perfect matches
-            partial_matches = []  # For partial matches
-
-            for question in all_questions:
-                description_lower = question.description.lower() if question.description else ""
-                question_text_lower = question.question.lower() if question.question else ""
-                combined_text = f"{description_lower} {question_text_lower}"
-
-                # Calculate match quality metrics
-                exact_phrase_match = query_lower in combined_text
-
-                # Count matching terms
-                matching_terms = sum(1 for term in query_terms if term in combined_text)
-                match_ratio = matching_terms / len(query_terms) if query_terms else 0
-
-                # Matching score calculation that considers phrase matches and term matches
-                if exact_phrase_match:
-                    # Direct phrase match (highest priority) - INCREASED THRESHOLD
-                    exact_matches.append(
-                        QueryResult(
-                            question=question,
-                            similarity_score=0.98,  # Increased from 0.95
-                            relevance_explanation=f"Direct match for query phrase in variable text"
-                        )
-                    )
-                elif match_ratio == 1.0:
-                    # All terms match but not as a complete phrase - INCREASED THRESHOLD
-                    exact_matches.append(
-                        QueryResult(
-                            question=question,
-                            similarity_score=0.95,  # Increased from 0.9
-                            relevance_explanation=f"All query terms found in variable text"
-                        )
-                    )
-                elif match_ratio >= 0.75:
-                    # Most terms match - INCREASED THRESHOLD
-                    good_matches.append(
-                        QueryResult(
-                            question=question,
-                            similarity_score=0.88,  # Increased from 0.85
-                            relevance_explanation=f"Most query terms found in variable text"
-                        )
-                    )
-                elif match_ratio >= 0.5:
-                    # Half or more terms match - INCREASED THRESHOLD
-                    partial_matches.append(
-                        QueryResult(
-                            question=question,
-                            similarity_score=0.78,  # Increased from 0.75
-                            relevance_explanation=f"Some query terms found in variable text"
-                        )
-                    )
-
-            # Add matches in priority order, avoiding duplicates
-            existing_vars = {result.question.variable_name for result in results}
-
-            # Define a helper function to add matches without duplicates
-            def add_matches(matches, existing_vars, results):
-                for match in matches:
-                    if match.question.variable_name not in existing_vars:
-                        results.append(match)
-                        existing_vars.add(match.question.variable_name)
-
-            # Add matches in priority order
-            add_matches(exact_matches, existing_vars, results)
-            add_matches(good_matches, existing_vars, results)
-            add_matches(partial_matches, existing_vars, results)
-
-        except Exception as e:
-            print(f"Error in direct text matching: {e}")
-
-        # If we haven't reached the limit yet, perform semantic search
+        # If we need more results
         if len(results) < limit:
-            remaining = limit - len(results)
+            remaining_limit = limit - len(results)
+
+            # Prepare filters
+            filters = {}
+
+            # Add time period filters if present
+            if intent.time_periods:
+                filters["wave"] = intent.time_periods
+
+            # Add other filters from intent
+            if intent.filter_criteria:
+                for key, value in intent.filter_criteria.items():
+                    if key not in filters:
+                        filters[key] = value
+
+            # Get existing variables to avoid duplicates
             existing_vars = {result.question.variable_name for result in results}
 
-        # Sort results by similarity score to ensure most relevant are first
+            try:
+                # Use hybrid search with proper error handling
+                hybrid_results = self.data_manager.hybrid_search(
+                    query_text=query,
+                    filters=filters,  # This will be properly handled now
+                    limit=remaining_limit * 2
+                )
+
+                # Filter out duplicates
+                hybrid_results = [r for r in hybrid_results
+                                  if r.question.variable_name not in existing_vars]
+
+                # Add to results
+                results.extend(hybrid_results[:remaining_limit])
+
+            except Exception as e:
+                print(f"Error in hybrid search during find_relevant_questions: {e}")
+                # Try fallback to direct semantic search
+                try:
+                    semantic_results = self.data_manager.query_similar(
+                        query_text=query,
+                        filters={},  # Empty filters should now be handled correctly
+                        limit=remaining_limit
+                    )
+
+                    # Filter out duplicates
+                    semantic_results = [r for r in semantic_results
+                                        if r.question.variable_name not in existing_vars]
+
+                    # Add to results
+                    results.extend(semantic_results[:remaining_limit])
+
+                except Exception as se:
+                    print(f"Fallback search also failed: {se}")
+
+        # Sort by relevance
         results.sort(key=lambda x: x.similarity_score, reverse=True)
 
-        # Limit the results
-        final_results = results[:limit]
-
         # Cache the results
+        final_results = results[:limit]
         self._memory_cache['query'][cache_key] = final_results
         self.cache_manager.set(cache_key, final_results)
 
-        return final_results  # Return at most 'limit' results
+        return final_results
 
     def generate_answer(self, query: str, intent: QueryIntent, results: List[QueryResult]) -> str:
         """
