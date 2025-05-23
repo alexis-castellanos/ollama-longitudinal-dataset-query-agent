@@ -1,82 +1,48 @@
+import json
 import re
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import numpy as np
 from src.data_models import SurveyResponse
 
 
+def extract_json_from_text(text: str) -> Optional[Dict[str, Any]]:
+    """Extract a JSON object from a text string.
+
+    Args:
+        text: Text that may contain a JSON object
+
+    Returns:
+        Extracted JSON as a dictionary, or None if no valid JSON found
+    """
+    try:
+        # Try to find JSON object between curly braces
+        json_pattern = r'({[\s\S]*?})'
+        match = re.search(json_pattern, text)
+
+        if match:
+            json_str = match.group(1)
+            return json.loads(json_str)
+
+        return None
+
+    except Exception:
+        return None
+
+
 def clean_text(text: str) -> str:
-    """
-    Clean and normalize text for better embedding and search.
+    """Clean text by removing extra whitespace.
 
     Args:
-        text: The input text to clean
+        text: Text to clean
 
     Returns:
-        Cleaned text string
+        Cleaned text
     """
-    if not text:
-        return ""
-
-    # Replace newlines with spaces
-    text = text.replace('\n', ' ')
-
-    # Remove multiple spaces
+    # Remove extra whitespace
     text = re.sub(r'\s+', ' ', text)
-
-    # Remove common survey formatting elements
-    text = re.sub(r'\(Mark \(X\) .*?\)', '', text)
-
-    # Strip and return
-    return text.strip()
-
-
-def normalize_query(query: str) -> str:
-    """
-    Normalize a query string to improve cache hit rates.
-
-    Normalization steps:
-    1. Convert to lowercase
-    2. Remove extra whitespace
-    3. Remove punctuation
-    4. Standardize word forms (like "sad", "sadness" → similar forms)
-
-    Args:
-        query: Original query string
-
-    Returns:
-        Normalized query string
-    """
-    import re
-
-    # Lowercase and strip whitespace
-    query = query.lower().strip()
-
-    # Remove punctuation and extra spaces
-    query = re.sub(r'[^\w\s]', ' ', query)
-    query = re.sub(r'\s+', ' ', query)
-
-    # Optional: Use stemming or lemmatization for word normalization
-    # This requires nltk to be installed:
-    # try:
-    #     from nltk.stem import PorterStemmer
-    #     stemmer = PorterStemmer()
-    #     words = query.split()
-    #     words = [stemmer.stem(word) for word in words]
-    #     query = ' '.join(words)
-    # except ImportError:
-    #     pass  # Skip stemming if nltk is not available
-
-    # Remove common words that don't affect meaning
-    stop_words = {'a', 'an', 'the', 'and', 'or', 'but', 'about', 'for', 'of', 'in', 'to', 'with'}
-    words = query.split()
-    words = [word for word in words if word not in stop_words]
-
-    # Sort words for order independence (optional)
-    # Enabling this would treat "depression symptoms" and "symptoms of depression" as the same query
-    # words.sort()
-
-    # Join back into a string
-    return ' '.join(words)
+    # Trim whitespace
+    text = text.strip()
+    return text
 
 
 def format_response_summary(responses: List[SurveyResponse]) -> str:
@@ -191,67 +157,196 @@ def extract_question_type(question_text: str) -> str:
         return "other"
 
 
+def parse_variable_name(text: str) -> str:
+    """Extract a likely variable name from text.
+
+    Args:
+        text: Text that may contain a variable name
+
+    Returns:
+        Extracted variable name or empty string
+    """
+    # Look for patterns like "variable X" or "X variable"
+    patterns = [
+        r'variable\s+([A-Z0-9]+)',  # "variable ABC123"
+        r'([A-Z][A-Z0-9]+)\s+variable',  # "ABC123 variable"
+        r'\b([A-Z][A-Z0-9]{2,})\b'  # Just look for uppercase acronyms with numbers
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(1).upper()
+
+    return ""
+
+
+def find_wave_references(text: str) -> List[str]:
+    """Find references to waves in text.
+
+    Args:
+        text: Text that may contain wave references
+
+    Returns:
+        List of wave references found
+    """
+    # Look for patterns like "wave X", "X wave", years, etc.
+    patterns = [
+        r'wave\s+([a-z0-9]+)',  # "wave 1", "wave A"
+        r'([a-z0-9]+)\s+wave',  # "1 wave", "A wave"
+        r'(20\d\d)\s+core',  # "2016 core"
+        r'(20\d\d)\s+survey',  # "2016 survey"
+    ]
+
+    waves = []
+    for pattern in patterns:
+        matches = re.finditer(pattern, text, re.IGNORECASE)
+        for match in matches:
+            waves.append(match.group(1))
+
+    return waves
+
+
+def create_structured_context(question, include_wave=True):
+    """
+    Create a structured context for a survey question with enhanced wave information.
+
+    Args:
+        question: SurveyQuestion object
+        include_wave: Whether to include wave information
+
+    Returns:
+        Structured context string
+    """
+    context_parts = []
+
+    # Include wave prominently if requested
+    if include_wave:
+        context_parts.append(f"WAVE: {question.wave}")
+
+    context_parts.extend([
+        f"VARIABLE: {question.variable_name}",
+        f"DESCRIPTION: {question.description}",
+        f"QUESTION: {question.question}",
+    ])
+
+    # Add response information
+    if question.response_items and len(question.response_items) > 0:
+        response_parts = ["RESPONSE OPTIONS:"]
+        for resp in question.response_items:
+            count_info = f" (Count: {resp.count})" if resp.count is not None else ""
+            response_parts.append(f"- {resp.option}{count_info}")
+        context_parts.append("\n".join(response_parts))
+
+    # Additional metadata
+    metadata_parts = ["METADATA:"]
+    metadata_parts.append(f"- Section: {question.section}")
+    metadata_parts.append(f"- Level: {question.level}")
+    metadata_parts.append(f"- Type: {question.type}")
+    if include_wave and question.wave:  # Add wave to metadata too for redundancy
+        metadata_parts.append(f"- Wave: {question.wave}")
+
+    context_parts.append("\n".join(metadata_parts))
+
+    return "\n\n".join(context_parts)
+
+
+def normalize_query(query: str) -> str:
+    """
+    Normalize a query string for consistent caching and matching.
+
+    Args:
+        query: Original query string
+
+    Returns:
+        Normalized query string
+    """
+    # Convert to lowercase
+    normalized = query.lower()
+
+    # Remove special characters except spaces
+    normalized = re.sub(r'[^\w\s]', '', normalized)
+
+    # Remove extra whitespace
+    normalized = re.sub(r'\s+', ' ', normalized).strip()
+
+    return normalized
+
+
 def format_filters_description(filters: Dict[str, Any]) -> str:
     """
-    Create a human-readable description of applied filters.
+    Format filter criteria into a human-readable description.
 
     Args:
         filters: Dictionary of filter criteria
 
     Returns:
-        Formatted filter description string
+        Human-readable description of filters
     """
     if not filters:
         return "No filters applied"
 
-    parts = []
+    descriptions = []
+
     for key, value in filters.items():
-        if isinstance(value, list):
-            parts.append(f"{key} is one of {', '.join(map(str, value))}")
+        if key == "wave":
+            if isinstance(value, list):
+                descriptions.append(f"Waves: {', '.join(value)}")
+            else:
+                descriptions.append(f"Wave: {value}")
+        elif key == "section":
+            if isinstance(value, list):
+                descriptions.append(f"Sections: {', '.join(value)}")
+            else:
+                descriptions.append(f"Section: {value}")
+        elif key == "variable_name":
+            if isinstance(value, list):
+                descriptions.append(f"Variables: {', '.join(value)}")
+            else:
+                descriptions.append(f"Variable: {value}")
+        elif key == "level":
+            if isinstance(value, list):
+                descriptions.append(f"Levels: {', '.join(value)}")
+            else:
+                descriptions.append(f"Level: {value}")
         else:
-            parts.append(f"{key} is {value}")
+            if isinstance(value, list):
+                descriptions.append(f"{key}: {', '.join(map(str, value))}")
+            else:
+                descriptions.append(f"{key}: {value}")
 
-    return ", ".join(parts)
+    return ", ".join(descriptions)
 
 
-def create_structured_context(question):
-    """
-    Create a structured context string for a question to feed to the LLM.
-
-    Args:
-        question: A SurveyQuestion object
-
-    Returns:
-        Formatted context string
-    """
-    # Get response stats if applicable
-    stats = get_response_stats(question.response_items)
-
-    context = f"""
-QUESTION ID: {question.variable_name}
-WAVE: {question.wave}
-SECTION: {question.section}
-DESCRIPTION: {question.description}
-
-QUESTION TEXT:
-{question.question}
-
-RESPONSE OPTIONS AND COUNTS:
-"""
-
-    for resp in question.response_items:
-        if resp.count is not None and resp.count != "":
-            context += f"- {resp.option}: {resp.count}\n"
-
-    # Add statistics if available
-    if stats.get("count", 0) > 0:
-        context += f"""
-STATISTICS:
-- Total responses: {stats.get('count')}
-- Mean response value: {stats.get('mean', 'N/A'):.2f}
-- Median response value: {stats.get('median', 'N/A'):.1f}
-- Standard deviation: {stats.get('std', 'N/A'):.2f}
-- Range: {stats.get('min', 'N/A')} to {stats.get('max', 'N/A')}
-"""
-
-    return context
+# def format_response_summary(response_items, max_items=5):
+#     """
+#     Format response items into a concise summary.
+#
+#     Args:
+#         response_items: List of response items
+#         max_items: Maximum number of items to include
+#
+#     Returns:
+#         Formatted summary string
+#     """
+#     if not response_items:
+#         return "No response data available"
+#
+#     # Sort by count (if available) to show most common responses first
+#     sorted_items = sorted(
+#         response_items,
+#         key=lambda x: x.count if x.count is not None else 0,
+#         reverse=True
+#     )
+#
+#     # Format items
+#     summary_parts = []
+#     for i, item in enumerate(sorted_items[:max_items]):
+#         count_info = f" (Count: {item.count})" if item.count is not None else ""
+#         summary_parts.append(f"{item.option}{count_info}")
+#
+#     # Add ellipsis if there are more items
+#     if len(sorted_items) > max_items:
+#         summary_parts.append(f"... and {len(sorted_items) - max_items} more options")
+#
+#     return "; ".join(summary_parts)
