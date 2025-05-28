@@ -390,7 +390,7 @@ class DataManager:
             except Exception as e2:
                 print(f"Error in fallback search: {e2}")
                 return []
-       
+    
 
     def hybrid_search(self,
                       query_text: str,
