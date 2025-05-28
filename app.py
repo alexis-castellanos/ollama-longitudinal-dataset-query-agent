@@ -2,6 +2,8 @@ import re
 import uuid
 import pandas as pd
 import streamlit as st
+import os
+import shutil
 
 # Local imports
 from src.data_manager import DataManager
@@ -37,9 +39,27 @@ if "initialized" not in st.session_state:
     st.session_state.available_sections = []
 
 
+def clear_cache_directories():
+    """Clear cache directories but preserve ChromaDB embeddings."""
+    cache_dirs = ["cache", "./cache"]  # Only clear cache directories, not chroma_db
+    
+    for cache_dir in cache_dirs:
+        if os.path.exists(cache_dir):
+            try:
+                shutil.rmtree(cache_dir)
+                st.info(f"Cleared existing cache directory: {cache_dir}")
+            except Exception as e:
+                st.warning(f"Could not clear cache directory {cache_dir}: {str(e)}")
+    
+    # Note: ChromaDB embeddings (chroma_db directory) are preserved to avoid re-embedding
+
+
 def initialize_system():
     """Initialize the data manager and query processor with fixed settings."""
-    with st.spinner("Loading survey data and initializing models..."):
+    with st.spinner("Clearing query cache and loading survey data..."):
+        # Clear cache directories first (but preserve embeddings)
+        clear_cache_directories()
+        
         # Initialize data manager
         data_manager = DataManager(
             data_path=DATA_PATH,
