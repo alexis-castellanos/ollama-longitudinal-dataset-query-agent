@@ -352,8 +352,8 @@ class DataManager:
         self._vector_search_cache[cache_key] = query_results
 
             # Cache to disk if available
-            if self.cache_manager:
-                self.cache_manager.set(cache_key, query_results)
+        if self.cache_manager:
+            self.cache_manager.set(cache_key, query_results)
 
             return query_results
     
