@@ -446,51 +446,35 @@ class QueryProcessor:
 
         return intent
 
+    # Update the find_relevant_questions method in QueryProcessor class
+
     def find_relevant_questions(self, query: str, intent: QueryIntent, limit: int = 20) -> List[QueryResult]:
         """
-        Find relevant survey questions based on query and intent with better handling
-        for larger result sets.
-
-        Args:
-            query: The original user query
-            intent: The analyzed query intent
-            limit: Maximum number of results to return (default increased to 20)
-
-        Returns:
-            List of QueryResult objects
+        Find relevant survey questions based on query and intent using hybrid search.
         """
-        # Create a cache key that includes the query and intent data
+        # Create a cache key
         cache_key = self._get_cache_key(
             'query',
             query,
             (intent.primary_intent, tuple(intent.target_variables), tuple(intent.time_periods), limit)
         )
 
-        # Check memory cache first (fastest)
+        # Check memory cache
         if cache_key in self._memory_cache['query']:
             print(f"Using memory cache for query results: {query}")
             return self._memory_cache['query'][cache_key]
 
-        # Then check disk cache
+        # Check disk cache
         cached_results = self.cache_manager.get(cache_key)
         if cached_results:
             print(f"Using disk cache for query results: {query}")
-            # Also store in memory cache for faster access next time
             self._memory_cache['query'][cache_key] = cached_results
             return cached_results
 
         # Start with an empty list
         results = []
 
-        # Convert query to lowercase for case-insensitive matching
-        query_lower = query.lower()
-        query_terms = re.findall(r'\b\w+\b', query_lower)
-
-        # Skip single-word general terms that might match too many variables
-        if len(query_terms) == 1 and query_terms[0] in ['variable', 'question', 'survey', 'data']:
-            query_terms = []
-
-        # If specific variables were mentioned, prioritize those
+        # First handle exact variable matches
         if intent.target_variables:
             for var_name in intent.target_variables:
                 question = self.data_manager.get_question_by_variable(var_name)
@@ -498,41 +482,17 @@ class QueryProcessor:
                     results.append(
                         QueryResult(
                             question=question,
-                            similarity_score=1.0,  # Perfect match
+                            similarity_score=1.0,
                             relevance_explanation=f"Exact match for requested variable {var_name}"
                         )
                     )
 
-        # Apply filters from intent, including time periods
+        # Apply filters from intent
         filters = {}
-
-        # IMPORTANT FIX: Add time_periods to filters if present
-        if intent.time_periods:
-            print(f"Filtering by time periods: {intent.time_periods}")
-            filters["wave"] = intent.time_periods
-        else:
-            # Use all available waves if none specified
-            available_waves = self.data_manager.get_unique_values("wave")
-            print(f"No time periods specified, using all available waves: {available_waves}")
-            filters["wave"] = available_waves
-
-        # Check if there are any other filter criteria in the intent
-        if intent.filter_criteria:
-            # Merge with existing filters
-            filters.update(intent.filter_criteria)
-            
-        print(f"Applied filters: {filters}")
 
         # Get a larger set of questions to search through
         try:
-            # IMPORTANT FIX: Pass filters to filter_questions to apply the time period filter
-            # and use balanced sampling with a higher limit
-            all_questions = self.data_manager.filter_questions(
-                filters=filters, 
-                limit=1000,  # Increased from 500
-                balanced=True
-            )
-            print(f"Retrieved {len(all_questions)} questions after filtering")
+            all_questions = self.data_manager.filter_questions(limit=500)
 
             # Prioritize direct keyword matches with categorization
             exact_matches = []  # For perfect or near-perfect matches
@@ -611,43 +571,19 @@ class QueryProcessor:
         if len(results) < limit:
             remaining = limit - len(results)
             existing_vars = {result.question.variable_name for result in results}
-            
-            try:
-                # IMPORTANT FIX: Also pass filters to semantic search for consistency
-                semantic_results = self.data_manager.query_similar(
-                    query_text=query,
-                    filters=filters,  # Pass the filters including time_periods
-                    limit=remaining
-                )
-                
-                # Filter out variables we already have
-                for result in semantic_results:
-                    if result.question.variable_name not in existing_vars:
-                        results.append(result)
-                        existing_vars.add(result.question.variable_name)
-                        
-                print(f"Added {len(semantic_results)} results from semantic search")
-            except Exception as e:
-                print(f"Error in semantic search: {e}")
 
         # Sort results by similarity score to ensure most relevant are first
         results.sort(key=lambda x: x.similarity_score, reverse=True)
 
         # Limit the results
         final_results = results[:limit]
-        
-        # Debug: Print distribution of waves in results
-        wave_distribution = {}
-        for result in final_results:
-            wave = result.question.wave
-            wave_distribution[wave] = wave_distribution.get(wave, 0) + 1
-        print(f"Wave distribution in results: {wave_distribution}")
 
         # Cache the results
+        final_results = results[:limit]
         self._memory_cache['query'][cache_key] = final_results
         self.cache_manager.set(cache_key, final_results)
 
-        return final_results  # Return at most 'limit' results
+        return final_results
 
     def generate_answer(self, query: str, intent: QueryIntent, results: List[QueryResult]) -> str:
         """

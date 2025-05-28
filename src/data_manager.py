@@ -1,15 +1,16 @@
 import json
 import uuid
 import hashlib
+import re
 import numpy as np
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 # Updated imports using newer package structure
 import chromadb
 import pandas as pd
 from chromadb.config import Settings
-from langchain_ollama import OllamaEmbeddings  # Updated import
-from langchain_chroma import Chroma  # Updated import
+from langchain_community.embeddings import OllamaEmbeddings
+from langchain_community.vectorstores import Chroma
 from pydantic import ValidationError
 
 # Local imports
@@ -56,6 +57,12 @@ class DataManager:
 
         # Cache for vector searches
         self._vector_search_cache = {}
+
+        # Cache for keyword searches
+        self._keyword_search_cache = {}
+
+        # Cache for hybrid searches
+        self._hybrid_search_cache = {}
 
         # Cache manager will be assigned externally if needed
         self.cache_manager = None
@@ -227,8 +234,9 @@ class DataManager:
         ids = [record.id for record in embedding_records]
 
         # Create document texts that combine question and response data
+        # Include wave information prominently for better wave-specific searches
         documents = [
-            f"Variable: {record.variable_name}\nDescription: {record.description}\n"
+            f"Wave: {record.wave}\nVariable: {record.variable_name}\nDescription: {record.description}\n"
             f"Question: {record.question_text}\nResponses: {record.response_summary}"
             for record in embedding_records
         ]
@@ -280,109 +288,68 @@ class DataManager:
                     limit: int = 5) -> List[QueryResult]:
         """
         Query the vector database for similar questions.
-
-        Args:
-            query_text: The query text
-            filters: Metadata filters to apply
-            limit: Maximum number of results to return
-
-        Returns:
-            List of QueryResult objects
         """
         if self.vector_db is None:
             raise ValueError("Vector DB not initialized. Call initialize_vector_db() first.")
 
+        # Ensure filters is never None
+        if filters is None:
+            filters = {}
+
+        # Only pass filter to Chroma if it's not empty
+        chroma_filter = filters if filters else None
+
         # Create a cache key
         cache_key = self._get_cache_key("vector_search", query_text, filters, limit)
 
-        # Check in-memory cache first (fastest)
+        # Check cache
         if cache_key in self._vector_search_cache:
             print(f"Using memory cache for vector search: {query_text}")
             return self._vector_search_cache[cache_key]
 
-        # Check disk cache if available
         if self.cache_manager:
             cached_results = self.cache_manager.get(cache_key)
             if cached_results:
                 print(f"Using disk cache for vector search: {query_text}")
-                # Also store in memory cache for faster future access
                 self._vector_search_cache[cache_key] = cached_results
                 return cached_results
 
-        # Set fixed random seed before query for deterministic results
+        # Set fixed random seed
         np.random.seed(42)
 
-        # Convert filters for ChromaDB
-        chroma_filters = None
-        if filters and "wave" in filters and isinstance(filters["wave"], list):
-            # ChromaDB expects a different structure for list filters
-            wave_list = filters["wave"]
-            
-            # Ensure proper wave format with " Core" suffix
-            formatted_waves = []
-            for wave in wave_list:
-                if isinstance(wave, str) and " Core" not in wave:
-                    formatted_waves.append(f"{wave} Core")
-                else:
-                    formatted_waves.append(wave)
-            
-            # Create OR conditions for each wave
-            chroma_filters = {"$or": []}
-            for wave in formatted_waves:
-                chroma_filters["$or"].append({"wave": {"$eq": wave}})
-            
-            print(f"Using ChromaDB OR filter for waves: {formatted_waves}")
-        elif filters:
-            # For other filters, just ensure wave formatting if present
-            chroma_filters = {}
-            for key, value in filters.items():
-                if key == "wave" and isinstance(value, str) and " Core" not in value:
-                    chroma_filters[key] = f"{value} Core"
-                else:
-                    chroma_filters[key] = value
+        # Perform the similarity search
+        results = self.vector_db.similarity_search_with_score(
+            query=query_text,
+            k=limit,
+            filter=filters
+        )
 
-        try:
-            # Perform the similarity search with appropriate filters
-            if chroma_filters:
-                print(f"Executing vector search with filters: {chroma_filters}")
-                results = self.vector_db.similarity_search_with_score(
-                    query=query_text,
-                    k=limit,
-                    filter=chroma_filters
+        # Process results
+        query_results = []
+        for doc, score in results:
+            # Extract the question ID from metadata
+            metadata = doc.metadata
+            variable_name = metadata.get("variable_name")
+
+            # Find the corresponding survey question
+            question = next(
+                (q for q in self.survey_data.questions if q.variable_name == variable_name),
+                None
+            )
+
+            if question:
+                # Convert similarity score (lower is better) to 0-1 scale (higher is better)
+                normalized_score = 1.0 - min(score, 1.0)
+
+                result = QueryResult(
+                    question=question,
+                    similarity_score=normalized_score,
+                    relevance_explanation=f"This question about '{question.description}' is similar to your query."
                 )
-            else:
-                # No filters
-                results = self.vector_db.similarity_search_with_score(
-                    query=query_text,
-                    k=limit
-                )
+                query_results.append(result)
 
-            # Process results
-            query_results = []
-            for doc, score in results:
-                # Extract the question ID from metadata
-                metadata = doc.metadata
-                variable_name = metadata.get("variable_name")
-
-                # Find the corresponding survey question
-                question = next(
-                    (q for q in self.survey_data.questions if q.variable_name == variable_name),
-                    None
-                )
-
-                if question:
-                    # Convert similarity score (lower is better) to 0-1 scale (higher is better)
-                    normalized_score = 1.0 - min(score, 1.0)
-
-                    result = QueryResult(
-                        question=question,
-                        similarity_score=normalized_score,
-                        relevance_explanation=f"This question about '{question.description}' is similar to your query."
-                    )
-                    query_results.append(result)
-
-            # Cache results in memory
-            self._vector_search_cache[cache_key] = query_results
+        # Cache results in memory
+        self._vector_search_cache[cache_key] = query_results
 
             # Cache to disk if available
             if self.cache_manager:
@@ -424,6 +391,112 @@ class DataManager:
                 print(f"Error in fallback search: {e2}")
                 return []
        
+
+    def hybrid_search(self,
+                      query_text: str,
+                      filters: Dict[str, Any] = None,
+                      limit: int = 5) -> List[QueryResult]:
+        """
+        Perform a hybrid search combining vector similarity and keyword matching.
+        """
+        # Ensure filters is never None
+        if filters is None:
+            filters = {}
+
+        # Create a cache key
+        cache_key = self._get_cache_key("hybrid_search", query_text, filters, limit)
+
+        # Check in-memory cache first
+        if cache_key in self._hybrid_search_cache:
+            print(f"Using memory cache for hybrid search: {query_text}")
+            return self._hybrid_search_cache[cache_key]
+
+        # Check disk cache if available
+        if self.cache_manager:
+            cached_results = self.cache_manager.get(cache_key)
+            if cached_results:
+                print(f"Using disk cache for hybrid search: {query_text}")
+                self._hybrid_search_cache[cache_key] = cached_results
+                return cached_results
+
+        # Set a higher limit for individual searches to ensure good coverage
+        search_limit = min(limit * 2, 20)
+
+        try:
+            # Get results from both search methods with proper error handling
+            try:
+                vector_results = self.query_similar(query_text, filters, search_limit)
+            except Exception as e:
+                print(f"Vector search error in hybrid search: {e}")
+                vector_results = []
+
+            try:
+                keyword_results = self.keyword_search(query_text, filters, search_limit)
+            except Exception as e:
+                print(f"Keyword search error in hybrid search: {e}")
+                keyword_results = []
+
+            # If both methods failed, return empty list
+            if not vector_results and not keyword_results:
+                print("Both search methods failed in hybrid search")
+                return []
+
+            # Combine results with deduplication
+            seen_variables = set()
+            hybrid_results = []
+
+            # Helper function to add results with deduplication
+            def add_results(results, hybrid_results, seen_variables, is_keyword=False):
+                for result in results:
+                    var_name = result.question.variable_name
+                    if var_name not in seen_variables:
+                        if is_keyword:
+                            result.similarity_score = min(1.0, result.similarity_score * 1.05)
+                        hybrid_results.append(result)
+                        seen_variables.add(var_name)
+
+            # First add exact variable name matches
+            exact_var_matches = [r for r in keyword_results if r.similarity_score >= 0.95]
+            add_results(exact_var_matches, hybrid_results, seen_variables, True)
+
+            # Then interleave remaining results
+            keyword_idx = 0
+            vector_idx = 0
+            remaining_keyword = [r for r in keyword_results if r.similarity_score < 0.95]
+
+            while len(hybrid_results) < limit:
+                # Add a keyword result if available
+                if keyword_idx < len(remaining_keyword):
+                    add_results([remaining_keyword[keyword_idx]], hybrid_results, seen_variables, True)
+                    keyword_idx += 1
+
+                # Break if we've reached the limit
+                if len(hybrid_results) >= limit:
+                    break
+
+                # Add a vector result if available
+                if vector_idx < len(vector_results):
+                    add_results([vector_results[vector_idx]], hybrid_results, seen_variables)
+                    vector_idx += 1
+
+                # Break if both lists are exhausted
+                if keyword_idx >= len(remaining_keyword) and vector_idx >= len(vector_results):
+                    break
+
+            # Sort and limit results
+            hybrid_results.sort(key=lambda x: x.similarity_score, reverse=True)
+            final_results = hybrid_results[:limit]
+
+            # Cache results
+            self._hybrid_search_cache[cache_key] = final_results
+            if self.cache_manager:
+                self.cache_manager.set(cache_key, final_results)
+
+            return final_results
+
+        except Exception as e:
+            print(f"Error in hybrid search: {e}")
+            return []
 
     def filter_questions(self,
                         filters: Dict[str, Any] = None,

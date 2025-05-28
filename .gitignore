@@ -31,7 +31,6 @@ ENV/
 .env.local
 
 # Data files
-data/*.json
 data/*.csv
 urls.txt
 processed_urls.json

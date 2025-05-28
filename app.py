@@ -23,8 +23,7 @@ MODEL_NAME = "granite3-dense:8b"
 #MODEL_NAME ="mistral-nemo:latest"
 
 EMBEDDING_MODEL = "nomic-embed-text:latest"
-#EMBEDDING_MODEL ="all-minilm:l12-v2"
-DATA_PATH = "data/hrs_data.json"
+DATA_PATH = "data/hrs_data_leave_behind.json"
 
 # Session state initialization
 if "initialized" not in st.session_state:
