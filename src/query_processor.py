@@ -494,6 +494,10 @@ class QueryProcessor:
         try:
             all_questions = self.data_manager.filter_questions(limit=500)
 
+            # ADD THESE MISSING LINES:
+            query_lower = query.lower()  # This was missing!
+            query_terms = query_lower.split()  # This was missing!
+
             # Prioritize direct keyword matches with categorization
             exact_matches = []  # For perfect or near-perfect matches
             good_matches = []  # For good but not perfect matches
@@ -510,7 +514,7 @@ class QueryProcessor:
                 # Count matching terms
                 matching_terms = sum(1 for term in query_terms if term in combined_text)
                 match_ratio = matching_terms / len(query_terms) if query_terms else 0
-
+                
                 # Matching score calculation that considers phrase matches and term matches
                 if exact_phrase_match:
                     # Direct phrase match (highest priority) - INCREASED THRESHOLD

@@ -280,8 +280,6 @@ class DataManager:
         # Hash it for shorter keys
         return f"{prefix}_{hashlib.md5(key_str.encode()).hexdigest()}"
 
- 
-
     def query_similar(self,
                     query_text: str,
                     filters: Dict[str, Any] = None,
@@ -314,49 +312,50 @@ class DataManager:
                 self._vector_search_cache[cache_key] = cached_results
                 return cached_results
 
-        # Set fixed random seed
-        np.random.seed(42)
+        try:
+            # Set fixed random seed
+            np.random.seed(42)
 
-        # Perform the similarity search
-        results = self.vector_db.similarity_search_with_score(
-            query=query_text,
-            k=limit,
-            filter=filters
-        )
-
-        # Process results
-        query_results = []
-        for doc, score in results:
-            # Extract the question ID from metadata
-            metadata = doc.metadata
-            variable_name = metadata.get("variable_name")
-
-            # Find the corresponding survey question
-            question = next(
-                (q for q in self.survey_data.questions if q.variable_name == variable_name),
-                None
+            # Perform the similarity search
+            results = self.vector_db.similarity_search_with_score(
+                query=query_text,
+                k=limit,
+                filter=filters
             )
 
-            if question:
-                # Convert similarity score (lower is better) to 0-1 scale (higher is better)
-                normalized_score = 1.0 - min(score, 1.0)
+            # Process results
+            query_results = []
+            for doc, score in results:
+                # Extract the question ID from metadata
+                metadata = doc.metadata
+                variable_name = metadata.get("variable_name")
 
-                result = QueryResult(
-                    question=question,
-                    similarity_score=normalized_score,
-                    relevance_explanation=f"This question about '{question.description}' is similar to your query."
+                # Find the corresponding survey question
+                question = next(
+                    (q for q in self.survey_data.questions if q.variable_name == variable_name),
+                    None
                 )
-                query_results.append(result)
 
-        # Cache results in memory
-        self._vector_search_cache[cache_key] = query_results
+                if question:
+                    # Convert similarity score (lower is better) to 0-1 scale (higher is better)
+                    normalized_score = 1.0 - min(score, 1.0)
+
+                    result = QueryResult(
+                        question=question,
+                        similarity_score=normalized_score,
+                        relevance_explanation=f"This question about '{question.description}' is similar to your query."
+                    )
+                    query_results.append(result)
+
+            # Cache results in memory
+            self._vector_search_cache[cache_key] = query_results
 
             # Cache to disk if available
-        if self.cache_manager:
-            self.cache_manager.set(cache_key, query_results)
+            if self.cache_manager:
+                self.cache_manager.set(cache_key, query_results)
 
             return query_results
-    
+            
         except Exception as e:
             print(f"Error in vector search: {e}")
             # Fallback to a simpler approach - no filtering
@@ -390,7 +389,6 @@ class DataManager:
             except Exception as e2:
                 print(f"Error in fallback search: {e2}")
                 return []
-    
 
     def hybrid_search(self,
                       query_text: str,
