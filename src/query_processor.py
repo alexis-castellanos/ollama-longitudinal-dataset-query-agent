@@ -157,16 +157,22 @@ class QueryProcessor:
         # Create the parser
         parser = PydanticOutputParser(pydantic_object=QueryIntent)
 
-        # Intent analysis prompt
+        # Intent analysis prompt with improved variable detection
         intent_template = """
         You are an AI assistant analyzing user queries about longitudinal survey data.
 
         Given a user query, determine the primary intent, extract relevant filters,
         and identify any specific variables or time periods mentioned.
 
+        IMPORTANT RULES FOR VARIABLE EXTRACTION:
+        - Only extract variable names if they are EXPLICITLY mentioned in formats like "KLB023D", "JLB001", or "variable ABC123"
+        - Do NOT extract variable names from natural language descriptions
+        - For queries like "satisfied with life" - this is asking about CONTENT, not a specific variable
+        - For queries like "show me JLB001" or "explain variable KLB023D" - these ARE asking for specific variables
+
         Available waves: {available_waves}
         Available sections: {available_sections}
-        Available variables: {sample_variables}
+        Sample variables: {sample_variables}
 
         USER QUERY: {query}
 
@@ -241,7 +247,6 @@ class QueryProcessor:
         # Create MD5 hash
         return f"{prefix}_{hashlib.md5(key_data.encode()).hexdigest()}"
 
-        
     def analyze_intent(self, query: str) -> QueryIntent:
         """
         Analyze the intent of a user query with improved error handling and caching.
@@ -291,6 +296,11 @@ class QueryProcessor:
             Available sections: {sections}
             Available variables: {variables}
 
+            CRITICAL RULES:
+            - Only extract variable names if EXPLICITLY mentioned (e.g., "KLB023D", "show me JLB001")
+            - Do NOT extract variables from natural language (e.g., "satisfied with life" should NOT extract any variables)
+            - Natural language queries are about CONTENT, not specific variable codes
+
             ONLY return a valid JSON object in this exact format with no additional wrapper or nested properties.
             DO NOT use comments in the JSON - they will break parsing:
             {{
@@ -336,13 +346,22 @@ class QueryProcessor:
                     if "confidence" not in data:
                         data["confidence"] = 0.7
 
-                    # Check if target_variables is a list of dictionaries and convert to strings
+                    # Additional validation: only keep variables that actually exist
                     if "target_variables" in data and isinstance(data["target_variables"], list):
-                        # Check if elements are dictionaries with a 'name' field
-                        for i, var in enumerate(data["target_variables"]):
+                        validated_variables = []
+                        for var in data["target_variables"]:
                             if isinstance(var, dict) and "name" in var:
-                                # Replace the dictionary with just the name string
-                                data["target_variables"][i] = var["name"]
+                                var_name = var["name"]
+                            else:
+                                var_name = str(var)
+                            
+                            # Check if variable actually exists in dataset
+                            if self.data_manager.get_question_by_variable(var_name):
+                                validated_variables.append(var_name)
+                            else:
+                                print(f"Removed non-existent variable: {var_name}")
+                        
+                        data["target_variables"] = validated_variables
                     
                     # IMPORTANT FIX: Handle time_periods in dictionary format
                     if "time_periods" in data and isinstance(data["time_periods"], list):
@@ -406,9 +425,15 @@ class QueryProcessor:
         elif re.search(r'\b(summarize|summary|overview)\b', query.lower()):
             primary_intent = "summarize"
 
-        # Try to extract any variable names (e.g., KLB033)
+        # Try to extract any variable names ONLY if explicitly mentioned
         variable_pattern = r'\b([A-Z]{2,3}\d{3}[A-Z]?)\b'
-        target_variables = re.findall(variable_pattern, query)
+        potential_variables = re.findall(variable_pattern, query)
+        
+        # Validate that these variables exist
+        target_variables = []
+        for var in potential_variables:
+            if self.data_manager.get_question_by_variable(var):
+                target_variables.append(var)
 
         # Extract any mentioned time periods (if waves are numeric)
         time_periods = []
@@ -446,8 +471,6 @@ class QueryProcessor:
 
         return intent
 
-    # Update the find_relevant_questions method in QueryProcessor class
-
     def find_relevant_questions(self, query: str, intent: QueryIntent, limit: int = 20) -> List[QueryResult]:
         """
         Find relevant survey questions based on query and intent using hybrid search.
@@ -474,16 +497,33 @@ class QueryProcessor:
         # Start with an empty list
         results = []
 
-        # First handle exact variable matches
+        # Handle exact variable matches with improved relevance checking
         if intent.target_variables:
             for var_name in intent.target_variables:
                 question = self.data_manager.get_question_by_variable(var_name)
                 if question:
+                    # Check content relevance for exact variable matches
+                    combined_text = f"{question.description} {question.question}".lower()
+                    query_lower = query.lower()
+                    
+                    # Simple relevance check
+                    query_terms = query_lower.split()
+                    matching_terms = sum(1 for term in query_terms if term in combined_text)
+                    relevance_ratio = matching_terms / len(query_terms) if query_terms else 0
+                    
+                    # Only give high scores if content is actually relevant
+                    if relevance_ratio > 0.3:  # At least 30% of query terms match
+                        similarity_score = 0.95 + (relevance_ratio * 0.05)  # 0.95-1.0 range
+                        explanation = f"Exact variable match with high content relevance"
+                    else:
+                        similarity_score = 0.6  # Lower score for irrelevant exact matches
+                        explanation = f"Exact variable match but low content relevance"
+                    
                     results.append(
                         QueryResult(
                             question=question,
-                            similarity_score=1.0,
-                            relevance_explanation=f"Exact match for requested variable {var_name}"
+                            similarity_score=similarity_score,
+                            relevance_explanation=explanation
                         )
                     )
 
@@ -494,9 +534,9 @@ class QueryProcessor:
         try:
             all_questions = self.data_manager.filter_questions(limit=500)
 
-            # ADD THESE MISSING LINES:
-            query_lower = query.lower()  # This was missing!
-            query_terms = query_lower.split()  # This was missing!
+            # ADD THESE MISSING LINES (Fix for the query_lower bug):
+            query_lower = query.lower()
+            query_terms = query_lower.split()
 
             # Prioritize direct keyword matches with categorization
             exact_matches = []  # For perfect or near-perfect matches
@@ -514,7 +554,7 @@ class QueryProcessor:
                 # Count matching terms
                 matching_terms = sum(1 for term in query_terms if term in combined_text)
                 match_ratio = matching_terms / len(query_terms) if query_terms else 0
-                
+
                 # Matching score calculation that considers phrase matches and term matches
                 if exact_phrase_match:
                     # Direct phrase match (highest priority) - INCREASED THRESHOLD
@@ -576,6 +616,23 @@ class QueryProcessor:
             remaining = limit - len(results)
             existing_vars = {result.question.variable_name for result in results}
 
+            try:
+                # Use semantic search for remaining slots
+                semantic_results = self.data_manager.query_similar(
+                    query_text=query,
+                    filters=filters,
+                    limit=remaining * 2  # Get more to account for duplicates
+                )
+
+                # Add non-duplicate semantic results
+                for result in semantic_results:
+                    if result.question.variable_name not in existing_vars and len(results) < limit:
+                        results.append(result)
+                        existing_vars.add(result.question.variable_name)
+
+            except Exception as e:
+                print(f"Error in semantic search: {e}")
+
         # Sort results by similarity score to ensure most relevant are first
         results.sort(key=lambda x: x.similarity_score, reverse=True)
 
@@ -583,7 +640,6 @@ class QueryProcessor:
         final_results = results[:limit]
 
         # Cache the results
-        final_results = results[:limit]
         self._memory_cache['query'][cache_key] = final_results
         self.cache_manager.set(cache_key, final_results)
 
@@ -822,8 +878,6 @@ class QueryProcessor:
                 except Exception as e:
                     print(f"Error in fallback semantic search: {e}")
 
-      
-
             # Generate answer
             if results:
                 answer = self.generate_answer(
@@ -878,9 +932,9 @@ class QueryProcessor:
         cache_key = self._get_cache_key('explain', variable_name)
 
         # Check caches
-        if cache_key in self._memory_cache.get('explain', {}):
+        if 'explain' in self._memory_cache and cache_key in self._memory_cache['explain']:
             print(f"Using memory cache for explanation of {variable_name}")
-            return self._memory_cache.get('explain', {}).get(cache_key)
+            return self._memory_cache['explain'][cache_key]
 
         # Check disk cache
         cached_explanation = self.cache_manager.get(cache_key)
@@ -891,6 +945,85 @@ class QueryProcessor:
                 self._memory_cache['explain'] = {}
             self._memory_cache['explain'][cache_key] = cached_explanation
             return cached_explanation
+
+        try:
+            # Get the question
+            question = self.data_manager.get_question_by_variable(variable_name)
+            
+            if not question:
+                explanation = f"Variable {variable_name} not found in the dataset."
+                
+                # Cache the negative result
+                if 'explain' not in self._memory_cache:
+                    self._memory_cache['explain'] = {}
+                self._memory_cache['explain'][cache_key] = explanation
+                self.cache_manager.set(cache_key, explanation)
+                
+                return explanation
+
+            # Create context for the question
+            context = create_structured_context(question)
+
+            # Prompt template
+            template = """
+            You are an AI assistant explaining longitudinal survey data.
+
+            TASK: Explain the variable {variable_name} in detail.
+
+            VARIABLE DATA:
+            {context}
+
+            Provide a comprehensive explanation that includes:
+            1. What this variable measures
+            2. How the question is asked to respondents
+            3. What the response options mean
+            4. Any important context about this measure
+            5. How this variable might be used in research
+
+            EXPLANATION:
+            """
+
+            prompt = PromptTemplate(
+                template=template,
+                input_variables=["variable_name", "context"]
+            )
+
+            # Create a one-off chain using LCEL pattern
+            chain = prompt | self.llm
+
+            # Generate explanation
+            explanation = chain.invoke({
+                "variable_name": variable_name,
+                "context": context
+            })
+
+            # Cache the result
+            if 'explain' not in self._memory_cache:
+                self._memory_cache['explain'] = {}
+            self._memory_cache['explain'][cache_key] = explanation
+            self.cache_manager.set(cache_key, explanation)
+
+            return explanation
+
+        except Exception as e:
+            print(f"Error in explain_variable: {e}")
+            
+            # Fallback response
+            if question:
+                fallback = f"Variable {variable_name}: {question.description}\n\n"
+                fallback += f"Question: {question.question}\n\n"
+                fallback += f"Wave: {question.wave}, Section: {question.section}\n\n"
+                fallback += f"This variable has {len(question.response_items)} response options."
+            else:
+                fallback = f"Variable {variable_name} not found in the dataset. Please check the variable name and try again."
+
+            # Cache the fallback response
+            if 'explain' not in self._memory_cache:
+                self._memory_cache['explain'] = {}
+            self._memory_cache['explain'][cache_key] = fallback
+            self.cache_manager.set(cache_key, fallback)
+
+            return fallback
 
     def compare_waves(self, variable_name: str, waves: List[str]) -> str:
         """
