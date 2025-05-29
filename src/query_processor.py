@@ -5,6 +5,7 @@ import numpy as np
 import hashlib
 import os
 import pickle
+import pandas as pd
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -15,7 +16,7 @@ from pydantic import BaseModel, Field
 
 from src.data_manager import DataManager
 # Local imports
-from src.data_models import QueryResult, UserQuery
+from src.data_models import QueryResult, UserQuery, SurveyQuestion
 from src.utils import create_structured_context, format_filters_description, normalize_query
 
 # Set fixed random seeds for deterministic behavior
@@ -114,6 +115,295 @@ class ProcessedQuery(BaseModel):
     results: List[QueryResult] = []
     answer: str = ""
     context_used: List[str] = []
+
+
+class LongitudinalAnalyzer:
+    """Analyzes changes in variables across waves for longitudinal studies."""
+    
+    def __init__(self, data_manager: DataManager):
+        self.data_manager = data_manager
+        
+    def find_longitudinal_variables(self, query_results: List[QueryResult]) -> Dict[str, List[SurveyQuestion]]:
+        """
+        Group similar variables across waves to identify longitudinal series.
+        
+        Args:
+            query_results: Results from a search query
+            
+        Returns:
+            Dictionary mapping concept names to lists of questions across waves
+        """
+        # Extract unique concepts by analyzing variable descriptions and questions
+        concept_groups = {}
+        
+        for result in query_results:
+            question = result.question
+            
+            # Create a concept key by cleaning the description
+            concept_key = self._extract_concept_key(question)
+            
+            if concept_key not in concept_groups:
+                concept_groups[concept_key] = []
+            
+            concept_groups[concept_key].append(question)
+        
+        # Sort each group by wave year
+        for concept_key in concept_groups:
+            concept_groups[concept_key].sort(key=lambda q: self._extract_wave_year(q.wave))
+            
+        return concept_groups
+    
+    def _extract_concept_key(self, question: SurveyQuestion) -> str:
+        """Extract a standardized concept key from question description."""
+        # Remove common prefixes and clean description
+        desc = question.description.lower()
+        
+        # Remove common survey prefixes
+        desc = re.sub(r'^(q\d+[a-z]?\.|how much|whether|if)', '', desc).strip()
+        
+        # Extract core concept (e.g., "satisfied with life")
+        core_concept = desc.split('.')[0].strip()
+        
+        return core_concept
+    
+    def _extract_wave_year(self, wave_str: str) -> int:
+        """Extract year from wave string."""
+        match = re.search(r'(\d{4})', wave_str)
+        return int(match.group(1)) if match else 0
+    
+    def analyze_longitudinal_changes(self, concept_groups: Dict[str, List[SurveyQuestion]]) -> Dict[str, Dict]:
+        """
+        Analyze what changed across waves for each longitudinal concept.
+        
+        Returns:
+            Dictionary with analysis results for each concept
+        """
+        analysis_results = {}
+        
+        for concept_key, questions in concept_groups.items():
+            if len(questions) < 2:
+                continue
+                
+            analysis = {
+                'concept': concept_key,
+                'waves_covered': [q.wave for q in questions],
+                'variable_names': [q.variable_name for q in questions],
+                'changes': self._detect_changes(questions),
+                'consistency_score': self._calculate_consistency_score(questions),
+                'recommendations': self._generate_recommendations(questions)
+            }
+            
+            analysis_results[concept_key] = analysis
+            
+        return analysis_results
+    
+    def _detect_changes(self, questions: List[SurveyQuestion]) -> Dict[str, Any]:
+        """Detect specific changes across waves."""
+        changes = {
+            'variable_naming': self._analyze_variable_naming_changes(questions),
+            'question_wording': self._analyze_question_wording_changes(questions),
+            'response_options': self._analyze_response_option_changes(questions),
+            'metadata_changes': self._analyze_metadata_changes(questions)
+        }
+        
+        return changes
+    
+    def _analyze_variable_naming_changes(self, questions: List[SurveyQuestion]) -> Dict:
+        """Analyze how variable names changed across waves."""
+        var_names = [q.variable_name for q in questions]
+        
+        # Extract patterns
+        prefixes = [re.match(r'^([A-Z]+)', name).group(1) if re.match(r'^([A-Z]+)', name) else '' for name in var_names]
+        numbers = [re.search(r'(\d+)', name).group(1) if re.search(r'(\d+)', name) else '' for name in var_names]
+        suffixes = [re.search(r'([A-Z])$', name).group(1) if re.search(r'([A-Z])$', name) else '' for name in var_names]
+        
+        return {
+            'variable_names': var_names,
+            'prefix_pattern': prefixes,
+            'number_pattern': numbers,
+            'suffix_pattern': suffixes,
+            'naming_consistent': len(set(prefixes)) == 1 and len(set(numbers)) == 1,
+            'pattern_description': self._describe_naming_pattern(prefixes, numbers, suffixes)
+        }
+    
+    def _analyze_question_wording_changes(self, questions: List[SurveyQuestion]) -> Dict:
+        """Analyze changes in question wording."""
+        question_texts = [q.question for q in questions]
+        
+        # Calculate similarity between consecutive waves
+        similarities = []
+        for i in range(1, len(question_texts)):
+            similarity = self._calculate_text_similarity(question_texts[i-1], question_texts[i])
+            similarities.append(similarity)
+        
+        # Detect specific changes
+        changes_detected = []
+        reference_text = question_texts[0]
+        
+        for i, text in enumerate(question_texts[1:], 1):
+            if text != reference_text:
+                changes_detected.append({
+                    'wave': questions[i].wave,
+                    'change_type': 'wording_modification',
+                    'details': self._identify_text_differences(reference_text, text)
+                })
+        
+        return {
+            'question_texts': question_texts,
+            'similarities': similarities,
+            'average_similarity': np.mean(similarities) if similarities else 1.0,
+            'changes_detected': changes_detected,
+            'wording_stable': len(set(question_texts)) == 1
+        }
+    
+    def _analyze_response_option_changes(self, questions: List[SurveyQuestion]) -> Dict:
+        """Analyze changes in response options."""
+        response_analyses = []
+        
+        # Compare response structures
+        for i, question in enumerate(questions):
+            options = [resp.option for resp in question.response_items if resp.count is not None]
+            
+            response_analyses.append({
+                'wave': question.wave,
+                'variable': question.variable_name,
+                'num_options': len(options),
+                'options': options,
+                'response_counts': {resp.option: resp.count for resp in question.response_items if resp.count is not None}
+            })
+        
+        # Detect changes
+        changes = []
+        if len(response_analyses) > 1:
+            reference = response_analyses[0]
+            
+            for analysis in response_analyses[1:]:
+                if analysis['options'] != reference['options']:
+                    changes.append({
+                        'wave': analysis['wave'],
+                        'change_type': 'response_options_modified',
+                        'added_options': set(analysis['options']) - set(reference['options']),
+                        'removed_options': set(reference['options']) - set(analysis['options'])
+                    })
+        
+        return {
+            'response_analyses': response_analyses,
+            'changes_detected': changes,
+            'options_stable': len(changes) == 0
+        }
+    
+    def _analyze_metadata_changes(self, questions: List[SurveyQuestion]) -> Dict:
+        """Analyze changes in metadata (section, level, type, etc.)."""
+        metadata_fields = ['section', 'level', 'type', 'width', 'decimals']
+        metadata_analysis = {}
+        
+        for field in metadata_fields:
+            values = [getattr(q, field, '') for q in questions]
+            metadata_analysis[field] = {
+                'values': values,
+                'stable': len(set(values)) == 1,
+                'changes': [(i, val) for i, val in enumerate(values) if i > 0 and val != values[0]]
+            }
+        
+        return metadata_analysis
+    
+    def _calculate_consistency_score(self, questions: List[SurveyQuestion]) -> float:
+        """Calculate overall consistency score across waves."""
+        scores = []
+        
+        # Question wording consistency (40% weight)
+        question_texts = [q.question for q in questions]
+        if len(set(question_texts)) == 1:
+            scores.append(1.0 * 0.4)
+        else:
+            avg_similarity = np.mean([
+                self._calculate_text_similarity(question_texts[i], question_texts[i+1])
+                for i in range(len(question_texts)-1)
+            ])
+            scores.append(avg_similarity * 0.4)
+        
+        # Response options consistency (30% weight)
+        response_options = [[resp.option for resp in q.response_items] for q in questions]
+        if all(opts == response_options[0] for opts in response_options):
+            scores.append(1.0 * 0.3)
+        else:
+            scores.append(0.5 * 0.3)  # Partial credit for some consistency
+        
+        # Metadata consistency (30% weight)
+        metadata_scores = []
+        for field in ['section', 'level', 'type']:
+            values = [getattr(q, field, '') for q in questions]
+            if len(set(values)) == 1:
+                metadata_scores.append(1.0)
+            else:
+                metadata_scores.append(0.0)
+        
+        scores.append(np.mean(metadata_scores) * 0.3)
+        
+        return sum(scores)
+    
+    def _calculate_text_similarity(self, text1: str, text2: str) -> float:
+        """Calculate similarity between two text strings."""
+        if text1 == text2:
+            return 1.0
+        
+        # Simple word-based similarity
+        words1 = set(text1.lower().split())
+        words2 = set(text2.lower().split())
+        
+        intersection = words1.intersection(words2)
+        union = words1.union(words2)
+        
+        return len(intersection) / len(union) if union else 0.0
+    
+    def _identify_text_differences(self, text1: str, text2: str) -> List[str]:
+        """Identify specific differences between two texts."""
+        differences = []
+        
+        words1 = set(text1.lower().split())
+        words2 = set(text2.lower().split())
+        
+        added_words = words2 - words1
+        removed_words = words1 - words2
+        
+        if added_words:
+            differences.append(f"Added words: {', '.join(added_words)}")
+        if removed_words:
+            differences.append(f"Removed words: {', '.join(removed_words)}")
+        
+        return differences
+    
+    def _describe_naming_pattern(self, prefixes: List[str], numbers: List[str], suffixes: List[str]) -> str:
+        """Describe the variable naming pattern."""
+        if len(set(prefixes)) == 1 and len(set(numbers)) == 1:
+            return f"Consistent pattern: {prefixes[0]}{numbers[0]}X where X changes by wave"
+        elif len(set(numbers)) == 1:
+            return f"Number consistent ({numbers[0]}), prefix varies by wave"
+        else:
+            return "Variable naming pattern changes across waves"
+    
+    def _generate_recommendations(self, questions: List[SurveyQuestion]) -> List[str]:
+        """Generate recommendations for longitudinal analysis."""
+        recommendations = []
+        
+        # Check for potential issues
+        var_names = [q.variable_name for q in questions]
+        question_texts = [q.question for q in questions]
+        
+        if len(set(question_texts)) > 1:
+            recommendations.append("⚠️ Question wording changed across waves - consider harmonization when analyzing trends")
+        
+        if len(set([len(q.response_items) for q in questions])) > 1:
+            recommendations.append("⚠️ Number of response options changed - verify comparability")
+        
+        # Positive recommendations
+        if len(set(question_texts)) == 1:
+            recommendations.append("✅ Question wording is consistent - good for trend analysis")
+        
+        recommendations.append(f"📊 {len(questions)} waves available for longitudinal analysis")
+        recommendations.append("🔍 Consider examining response distributions for each wave")
+        
+        return recommendations
 
 
 class QueryProcessor:
@@ -917,6 +1207,67 @@ class QueryProcessor:
                 answer=f"I encountered an issue while processing your query. Please try rephrasing or asking a more specific question about the survey data.",
                 context_used=[]
             )
+
+    def analyze_longitudinal_patterns(self, query_results: List[QueryResult]) -> Dict[str, Any]:
+        """
+        Analyze longitudinal patterns in query results.
+        
+        Args:
+            query_results: Results from a search query
+            
+        Returns:
+            Comprehensive longitudinal analysis
+        """
+        analyzer = LongitudinalAnalyzer(self.data_manager)
+        
+        # Group variables by concept
+        concept_groups = analyzer.find_longitudinal_variables(query_results)
+        
+        # Analyze changes for each concept
+        analysis_results = analyzer.analyze_longitudinal_changes(concept_groups)
+        
+        # Generate summary
+        summary = {
+            'total_concepts': len(concept_groups),
+            'concepts_analyzed': len(analysis_results),
+            'concept_analyses': analysis_results,
+            'overall_insights': self._generate_overall_insights(analysis_results)
+        }
+        
+        return summary
+
+    def _generate_overall_insights(self, analysis_results: Dict[str, Dict]) -> List[str]:
+        """Generate overall insights across all concepts."""
+        insights = []
+        
+        if not analysis_results:
+            return ["No longitudinal patterns detected in the results."]
+        
+        # Calculate average consistency
+        consistency_scores = [analysis['consistency_score'] for analysis in analysis_results.values()]
+        avg_consistency = np.mean(consistency_scores)
+        
+        if avg_consistency > 0.9:
+            insights.append("🎯 High consistency across waves - excellent for trend analysis")
+        elif avg_consistency > 0.7:
+            insights.append("📈 Moderate consistency - some harmonization may be needed")
+        else:
+            insights.append("⚠️ Low consistency - significant changes detected across waves")
+        
+        # Variable naming patterns
+        naming_patterns = []
+        for analysis in analysis_results.values():
+            if analysis['changes']['variable_naming']['naming_consistent']:
+                naming_patterns.append("consistent")
+            else:
+                naming_patterns.append("varied")
+        
+        if naming_patterns.count("consistent") > len(naming_patterns) / 2:
+            insights.append("🏷️ Variable naming follows consistent patterns")
+        else:
+            insights.append("🔄 Variable naming patterns vary across concepts")
+        
+        return insights
 
     def explain_variable(self, variable_name: str) -> str:
         """

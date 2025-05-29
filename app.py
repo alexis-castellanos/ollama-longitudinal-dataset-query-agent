@@ -4,6 +4,7 @@ import pandas as pd
 import streamlit as st
 import os
 import shutil
+import numpy as np
 
 # Local imports
 from src.data_manager import DataManager
@@ -162,7 +163,7 @@ def display_question_details(question: SurveyQuestion):
 
 
 def process_user_query(query_text: str):
-    """Process a user query and add to chat history."""
+    """Process a user query and add to chat history with longitudinal analysis."""
     if not query_text.strip():
         return
 
@@ -181,13 +182,190 @@ def process_user_query(query_text: str):
         # Process the query
         processed = st.session_state.query_processor.process_query(user_query)
 
+        # NEW: Analyze longitudinal patterns if we have multiple results
+        longitudinal_analysis = None
+        if len(processed.results) > 1:
+            try:
+                longitudinal_analysis = st.session_state.query_processor.analyze_longitudinal_patterns(processed.results)
+            except Exception as e:
+                print(f"Error in longitudinal analysis: {e}")
+                longitudinal_analysis = None
+
         # Add assistant response to chat
         st.session_state.chat_history.append({
             "role": "assistant",
             "content": processed.answer,
             "results": processed.results,
-            "intent": processed.intent
+            "intent": processed.intent,
+            "longitudinal_analysis": longitudinal_analysis  # NEW
         })
+
+
+def display_longitudinal_analysis(analysis: dict, message_idx: int):
+    """Display longitudinal analysis results."""
+    if not analysis or analysis.get('total_concepts', 0) == 0:
+        return
+    
+    st.divider()
+    st.subheader("📊 Longitudinal Analysis")
+    
+    # Overall insights
+    if 'overall_insights' in analysis:
+        st.markdown("### Key Insights")
+        for insight in analysis['overall_insights']:
+            st.markdown(f"- {insight}")
+    
+    # Concept-by-concept analysis
+    if 'concept_analyses' in analysis and analysis['concept_analyses']:
+        st.markdown("### Detailed Wave Comparison")
+        
+        for concept_key, concept_analysis in analysis['concept_analyses'].items():
+            with st.expander(f"📈 {concept_analysis['concept'].title()} - {len(concept_analysis['waves_covered'])} waves"):
+                
+                # Summary metrics
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.metric(
+                        "Consistency Score", 
+                        f"{concept_analysis['consistency_score']:.2f}",
+                        help="1.0 = Perfect consistency across waves"
+                    )
+                
+                with col2:
+                    st.metric(
+                        "Waves Covered",
+                        len(concept_analysis['waves_covered'])
+                    )
+                
+                with col3:
+                    question_stable = concept_analysis['changes']['question_wording']['wording_stable']
+                    st.metric(
+                        "Question Stability",
+                        "✅ Stable" if question_stable else "⚠️ Changed"
+                    )
+                
+                # Detailed changes analysis
+                changes = concept_analysis['changes']
+                
+                # Variable naming pattern
+                st.markdown("#### Variable Naming Pattern")
+                naming = changes['variable_naming']
+                
+                # Create a DataFrame for better display
+                naming_df = pd.DataFrame({
+                    'Wave': concept_analysis['waves_covered'],
+                    'Variable Name': naming['variable_names'],
+                    'Prefix': naming['prefix_pattern'],
+                    'Number': naming['number_pattern'],
+                    'Suffix': naming['suffix_pattern']
+                })
+                
+                st.dataframe(naming_df, use_container_width=True)
+                
+                if naming['pattern_description']:
+                    st.info(f"**Pattern**: {naming['pattern_description']}")
+                
+                # Question wording analysis
+                st.markdown("#### Question Wording Changes")
+                wording = changes['question_wording']
+                
+                if wording['wording_stable']:
+                    st.success("✅ Question wording is identical across all waves")
+                else:
+                    st.warning("⚠️ Question wording changed across waves")
+                    
+                    # Show similarity scores
+                    if wording['similarities']:
+                        similarity_df = pd.DataFrame({
+                            'Wave Transition': [f"{concept_analysis['waves_covered'][i]} → {concept_analysis['waves_covered'][i+1]}" 
+                                              for i in range(len(wording['similarities']))],
+                            'Similarity Score': wording['similarities']
+                        })
+                        st.dataframe(similarity_df, use_container_width=True)
+                    
+                    # Show specific changes
+                    if wording['changes_detected']:
+                        st.markdown("**Specific Changes Detected:**")
+                        for change in wording['changes_detected']:
+                            st.markdown(f"- **{change['wave']}**: {', '.join(change['details'])}")
+                
+                # Response options analysis
+                st.markdown("#### Response Options Analysis")
+                response_changes = changes['response_options']
+                
+                if response_changes['options_stable']:
+                    st.success("✅ Response options are consistent across waves")
+                else:
+                    st.warning("⚠️ Response options changed across waves")
+                    
+                    for change in response_changes['changes_detected']:
+                        st.markdown(f"**{change['wave']}:**")
+                        if change['added_options']:
+                            st.markdown(f"  - Added: {', '.join(change['added_options'])}")
+                        if change['removed_options']:
+                            st.markdown(f"  - Removed: {', '.join(change['removed_options'])}")
+                
+                # Response counts comparison (if available)
+                response_data = response_changes['response_analyses']
+                if len(response_data) > 1:
+                    st.markdown("#### Response Distribution Comparison")
+                    
+                    # Create a comparison table
+                    all_options = set()
+                    for analysis_item in response_data:
+                        all_options.update(analysis_item['response_counts'].keys())
+                    
+                    comparison_data = []
+                    for option in sorted(all_options):
+                        row = {'Response Option': option}
+                        for analysis_item in response_data:
+                            count = analysis_item['response_counts'].get(option, 0)
+                            row[f"{analysis_item['wave']} (Count)"] = count
+                        comparison_data.append(row)
+                    
+                    if comparison_data:
+                        comparison_df = pd.DataFrame(comparison_data)
+                        st.dataframe(comparison_df, use_container_width=True)
+                        
+                        # Create a visualization if there are numeric response options
+                        try:
+                            # Try to create a trend chart for numeric responses
+                            numeric_options = []
+                            for option in all_options:
+                                match = re.match(r'^(\d+)', option)
+                                if match:
+                                    numeric_options.append((int(match.group(1)), option))
+                            
+                            if numeric_options and len(response_data) > 1:
+                                numeric_options.sort()
+                                
+                                chart_data = {}
+                                for analysis_item in response_data:
+                                    wave_data = []
+                                    for num_val, option in numeric_options:
+                                        count = analysis_item['response_counts'].get(option, 0)
+                                        wave_data.append(count)
+                                    chart_data[analysis_item['wave']] = wave_data
+                                
+                                chart_df = pd.DataFrame(
+                                    chart_data,
+                                    index=[f"{num}: {opt.split('.', 1)[1] if '.' in opt else opt}" 
+                                          for num, opt in numeric_options]
+                                )
+                                
+                                st.markdown("**Response Distribution Trends:**")
+                                st.bar_chart(chart_df)
+                        
+                        except Exception as e:
+                            # If visualization fails, just continue
+                            pass
+                
+                # Recommendations
+                if concept_analysis['recommendations']:
+                    st.markdown("#### Recommendations")
+                    for rec in concept_analysis['recommendations']:
+                        st.markdown(f"- {rec}")
 
 
 def sidebar():
@@ -219,8 +397,7 @@ def sidebar():
 
 
 def chat_interface():
-    """Render the chat interface."""
-
+    """Render the chat interface with longitudinal analysis."""
     st.title("📊 Longitudinal Data Assistant")
     st.markdown("""
         Ask questions about longitudinal datasets using natural language. 
@@ -241,6 +418,28 @@ def chat_interface():
 
     # Input container at the bottom
     with st.container():
+        # Add some example queries
+        st.markdown("**💡 Try these example queries:**")
+        example_cols = st.columns(3)
+        
+        with example_cols[0]:
+            if st.button("🎯 Variables about life satisfaction", use_container_width=True):
+                st.session_state.example_query = "satisfied with life"
+        
+        with example_cols[1]:
+            if st.button("📈 Health-related questions", use_container_width=True):
+                st.session_state.example_query = "health"
+        
+        with example_cols[2]:
+            if st.button("💰 Financial variables", use_container_width=True):
+                st.session_state.example_query = "financial"
+        
+        # Handle example query
+        if 'example_query' in st.session_state:
+            process_user_query(st.session_state.example_query)
+            del st.session_state.example_query
+            st.rerun()
+        
         query_text = st.chat_input("Ask about the survey data...")
         if query_text:
             process_user_query(query_text)
@@ -272,10 +471,13 @@ def chat_interface():
                                     st.markdown(result.question.question)
 
                                     # Button to show details with a guaranteed unique key
-                                    # Use conversation_id, message_idx, and result variable_name
                                     btn_key = f"btn_{st.session_state.conversation_id}_{message_idx}_{i}_{result.question.variable_name}"
                                     if st.button("Show Details", key=btn_key):
                                         st.session_state.selected_question = result.question
+
+                    # NEW: Display longitudinal analysis if available
+                    if "longitudinal_analysis" in message and message["longitudinal_analysis"]:
+                        display_longitudinal_analysis(message["longitudinal_analysis"], message_idx)
 
                     # If there's intent info, add an expander
                     if "intent" in message:
