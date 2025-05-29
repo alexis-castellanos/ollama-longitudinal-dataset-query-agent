@@ -760,9 +760,11 @@ class QueryProcessor:
         self.cache_manager.set(cache_key, intent)
 
         return intent
+
+
     def find_relevant_questions(self, query: str, intent: QueryIntent, limit: int = 20) -> List[QueryResult]:
         """
-        Find relevant survey questions based on query and intent using hybrid search.
+        Find relevant survey questions based on query and intent using enhanced relevance scoring.
         """
         # Create a cache key
         cache_key = self._get_cache_key(
@@ -823,24 +825,23 @@ class QueryProcessor:
         try:
             all_questions = self.data_manager.filter_questions(limit=500)
 
-            # ADD THESE MISSING LINES (Fix for the query_lower bug):
             query_lower = query.lower()
             query_terms = query_lower.split()
-            
-            # Clean the query for better matching
             cleaned_query = query_lower.strip()
 
-            # Prioritize direct keyword matches with categorization
-            exact_matches = []  # For perfect or near-perfect matches
-            good_matches = []  # For good but not perfect matches
-            partial_matches = []  # For partial matches
+            # Enhanced categorization with more granular scoring
+            exact_matches = []
+            high_relevance = []    # High relevance matches
+            good_matches = []
+            medium_matches = []    # Medium relevance matches  
+            partial_matches = []
 
             for question in all_questions:
                 description_lower = question.description.lower() if question.description else ""
                 question_text_lower = question.question.lower() if question.question else ""
                 combined_text = f"{description_lower} {question_text_lower}"
 
-                # NEW: Check for PERFECT matches first
+                # Check for PERFECT matches first
                 description_clean = description_lower.strip()
                 question_clean = question_text_lower.strip()
                 
@@ -848,14 +849,12 @@ class QueryProcessor:
                 
                 # Perfect match conditions for exact conceptual matches
                 if cleaned_query in description_clean:
-                    # Check if it's a complete phrase match, not just substring
                     if (cleaned_query == description_clean or 
                         f" {cleaned_query} " in f" {description_clean} " or
                         description_clean.startswith(f"{cleaned_query} ") or
                         description_clean.endswith(f" {cleaned_query}")):
                         perfect_match = True
                 
-                # Check if query exactly matches question text
                 if cleaned_query in question_clean:
                     if (cleaned_query == question_clean or 
                         f" {cleaned_query} " in f" {question_clean} " or
@@ -871,70 +870,46 @@ class QueryProcessor:
                     exact_matches.append(
                         QueryResult(
                             question=question,
-                            similarity_score=1.00,  # PERFECT SCORE for perfect matches
+                            similarity_score=1.00,
                             relevance_explanation="Perfect match - query exactly matches variable concept"
                         )
                     )
                     continue
 
-                # Calculate match quality metrics for non-perfect matches
-                exact_phrase_match = query_lower in combined_text
-
-                # Count matching terms
-                matching_terms = sum(1 for term in query_terms if term in combined_text)
-                match_ratio = matching_terms / len(query_terms) if query_terms else 0
-
-                # Matching score calculation that considers phrase matches and term matches
-                if exact_phrase_match:
-                    # Direct phrase match (high priority) - INCREASED THRESHOLD
-                    exact_matches.append(
-                        QueryResult(
-                            question=question,
-                            similarity_score=0.98,  # Increased from 0.95
-                            relevance_explanation=f"Direct match for query phrase in variable text"
-                        )
-                    )
-                elif match_ratio == 1.0:
-                    # All terms match but not as a complete phrase - INCREASED THRESHOLD
-                    exact_matches.append(
-                        QueryResult(
-                            question=question,
-                            similarity_score=0.95,  # Increased from 0.9
-                            relevance_explanation=f"All query terms found in variable text"
-                        )
-                    )
-                elif match_ratio >= 0.8:
-                    # Most terms match - INCREASED THRESHOLD
-                    good_matches.append(
-                        QueryResult(
-                            question=question,
-                            similarity_score=0.90,  # Increased from 0.88
-                            relevance_explanation=f"Most query terms found in variable text"
-                        )
-                    )
-                elif match_ratio >= 0.6:
-                    # Half or more terms match - INCREASED THRESHOLD
-                    partial_matches.append(
-                        QueryResult(
-                            question=question,
-                            similarity_score=0.85,  # Increased from 0.78
-                            relevance_explanation=f"Some query terms found in variable text"
-                        )
-                    )
+                # ENHANCED RELEVANCE SCORING for non-perfect matches
+                score, explanation = self._calculate_enhanced_relevance_score(
+                    query_lower, query_terms, cleaned_query, 
+                    description_lower, question_text_lower, combined_text
+                )
+                
+                # Only include results above minimum threshold
+                if score >= 0.60:
+                    # Categorize based on enhanced scores
+                    if score >= 0.95:
+                        exact_matches.append(QueryResult(question=question, similarity_score=score, relevance_explanation=explanation))
+                    elif score >= 0.90:
+                        high_relevance.append(QueryResult(question=question, similarity_score=score, relevance_explanation=explanation))
+                    elif score >= 0.80:
+                        good_matches.append(QueryResult(question=question, similarity_score=score, relevance_explanation=explanation))
+                    elif score >= 0.70:
+                        medium_matches.append(QueryResult(question=question, similarity_score=score, relevance_explanation=explanation))
+                    else:  # 0.60-0.69
+                        partial_matches.append(QueryResult(question=question, similarity_score=score, relevance_explanation=explanation))
 
             # Add matches in priority order, avoiding duplicates
             existing_vars = {result.question.variable_name for result in results}
 
-            # Define a helper function to add matches without duplicates
             def add_matches(matches, existing_vars, results):
                 for match in matches:
                     if match.question.variable_name not in existing_vars:
                         results.append(match)
                         existing_vars.add(match.question.variable_name)
 
-            # Add matches in priority order
+            # Add matches in enhanced priority order
             add_matches(exact_matches, existing_vars, results)
+            add_matches(high_relevance, existing_vars, results)
             add_matches(good_matches, existing_vars, results)
+            add_matches(medium_matches, existing_vars, results)
             add_matches(partial_matches, existing_vars, results)
 
         except Exception as e:
@@ -973,6 +948,129 @@ class QueryProcessor:
         self.cache_manager.set(cache_key, final_results)
 
         return final_results
+
+
+    def _calculate_enhanced_relevance_score(self, query_lower: str, query_terms: list, cleaned_query: str, 
+                                        description_lower: str, question_text_lower: str, combined_text: str) -> tuple:
+        """
+        Calculate enhanced relevance score based on multiple factors.
+        Returns (score, explanation) tuple.
+        """
+        
+        # Initialize base score
+        base_score = 0.0
+        score_factors = []
+        
+        # Factor 1: Exact phrase matching (high weight)
+        exact_phrase_match = cleaned_query in combined_text
+        if exact_phrase_match:
+            base_score += 0.40
+            score_factors.append("exact phrase match")
+        
+        # Factor 2: Term matching ratio - This is the foundation score
+        matching_terms = sum(1 for term in query_terms if term in combined_text)
+        match_ratio = matching_terms / len(query_terms) if query_terms else 0
+        
+        # Give base score based on match ratio
+        if match_ratio == 1.0:
+            base_score += 0.35  # All terms match
+            score_factors.append("all terms match")
+        elif match_ratio >= 0.8:
+            base_score += 0.30  # Most terms match
+            score_factors.append("most terms match")
+        elif match_ratio >= 0.6:
+            base_score += 0.25  # Many terms match
+            score_factors.append("many terms match")
+        elif match_ratio >= 0.4:
+            base_score += 0.20  # Some terms match
+            score_factors.append("some terms match")
+        elif match_ratio > 0:
+            base_score += 0.15  # Few terms match
+            score_factors.append("few terms match")
+        
+        # Factor 3: High-value term bonuses (more sophisticated)
+        high_value_bonus = 0
+        
+        # For "satisfied with life" queries, prioritize these concepts
+        if "satisfied" in cleaned_query:
+            if "satisfied" in combined_text:
+                high_value_bonus += 0.15
+                score_factors.append("key term: satisfied")
+            if "satisfaction" in combined_text:
+                high_value_bonus += 0.10
+                score_factors.append("key term: satisfaction")
+        
+        if "life" in cleaned_query:
+            if "life" in combined_text:
+                high_value_bonus += 0.15
+                score_factors.append("key term: life")
+            # Bonus for life-quality concepts
+            life_quality_terms = ["ideal", "close to", "whole", "personal", "family", "important"]
+            life_quality_matches = sum(1 for term in life_quality_terms if term in combined_text)
+            if life_quality_matches > 0:
+                high_value_bonus += min(0.10, life_quality_matches * 0.03)
+                score_factors.append(f"life-quality concepts ({life_quality_matches})")
+        
+        base_score += high_value_bonus
+        
+        # Factor 4: Question vs Description placement bonuses
+        if any(term in description_lower for term in query_terms):
+            base_score += 0.08
+            score_factors.append("matches description")
+        elif any(term in question_text_lower for term in query_terms):
+            base_score += 0.04
+            score_factors.append("matches question text")
+        
+        # Factor 5: Psychological/subjective measure indicators
+        if "satisfied" in cleaned_query or "life" in cleaned_query:
+            psych_indicators = ["agree", "disagree", "statements", "much you", "think about", "feel", "close to"]
+            psych_matches = sum(1 for indicator in psych_indicators if indicator in combined_text)
+            if psych_matches > 0:
+                psych_bonus = min(0.08, psych_matches * 0.02)
+                base_score += psych_bonus
+                score_factors.append("psychological measure")
+        
+        # Factor 6: Domain relevance penalties/bonuses
+        domain_adjustment = 0
+        
+        # Bonus for well-being/life satisfaction domain
+        wellbeing_terms = ["happiness", "well-being", "quality", "ideal", "control", "important"]
+        wellbeing_matches = sum(1 for term in wellbeing_terms if term in combined_text)
+        if wellbeing_matches > 0:
+            domain_adjustment += min(0.06, wellbeing_matches * 0.02)
+            score_factors.append("well-being domain")
+        
+        # Small penalty for work/job context when asking about life satisfaction
+        if "satisfied" in cleaned_query and not "job" in cleaned_query and not "work" in cleaned_query:
+            work_terms = ["job", "work", "employment", "career"]
+            work_matches = sum(1 for term in work_terms if term in combined_text)
+            if work_matches > 0:
+                domain_adjustment -= 0.03
+                score_factors.append("work context penalty")
+        
+        base_score += domain_adjustment
+        
+        # Factor 7: Contextual relevance boost
+        # If description contains the query concept, boost significantly
+        core_concepts = ["satisfied with life", "life satisfaction", "happiness", "well-being"]
+        for concept in core_concepts:
+            if concept in cleaned_query and concept in combined_text:
+                base_score += 0.12
+                score_factors.append(f"core concept: {concept}")
+                break
+        
+        # Ensure score stays within reasonable bounds
+        final_score = max(0.0, min(0.98, base_score))
+        
+        # Create explanation
+        if score_factors:
+            explanation = "Relevance: " + ", ".join(score_factors[:4])  # Limit to first 4 factors for readability
+        else:
+            explanation = "Basic term matching"
+        
+        return final_score, explanation
+
+
 
     def generate_answer(self, query: str, intent: QueryIntent, results: List[QueryResult]) -> str:
         """
