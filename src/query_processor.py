@@ -760,7 +760,6 @@ class QueryProcessor:
         self.cache_manager.set(cache_key, intent)
 
         return intent
-
     def find_relevant_questions(self, query: str, intent: QueryIntent, limit: int = 20) -> List[QueryResult]:
         """
         Find relevant survey questions based on query and intent using hybrid search.
@@ -827,6 +826,9 @@ class QueryProcessor:
             # ADD THESE MISSING LINES (Fix for the query_lower bug):
             query_lower = query.lower()
             query_terms = query_lower.split()
+            
+            # Clean the query for better matching
+            cleaned_query = query_lower.strip()
 
             # Prioritize direct keyword matches with categorization
             exact_matches = []  # For perfect or near-perfect matches
@@ -838,7 +840,44 @@ class QueryProcessor:
                 question_text_lower = question.question.lower() if question.question else ""
                 combined_text = f"{description_lower} {question_text_lower}"
 
-                # Calculate match quality metrics
+                # NEW: Check for PERFECT matches first
+                description_clean = description_lower.strip()
+                question_clean = question_text_lower.strip()
+                
+                perfect_match = False
+                
+                # Perfect match conditions for exact conceptual matches
+                if cleaned_query in description_clean:
+                    # Check if it's a complete phrase match, not just substring
+                    if (cleaned_query == description_clean or 
+                        f" {cleaned_query} " in f" {description_clean} " or
+                        description_clean.startswith(f"{cleaned_query} ") or
+                        description_clean.endswith(f" {cleaned_query}")):
+                        perfect_match = True
+                
+                # Check if query exactly matches question text
+                if cleaned_query in question_clean:
+                    if (cleaned_query == question_clean or 
+                        f" {cleaned_query} " in f" {question_clean} " or
+                        question_clean.startswith(f"{cleaned_query} ") or
+                        question_clean.endswith(f" {cleaned_query}")):
+                        perfect_match = True
+                
+                # Special handling for common research concepts
+                if "satisfied with life" in cleaned_query and "satisfied with life" in description_clean:
+                    perfect_match = True
+                
+                if perfect_match:
+                    exact_matches.append(
+                        QueryResult(
+                            question=question,
+                            similarity_score=1.00,  # PERFECT SCORE for perfect matches
+                            relevance_explanation="Perfect match - query exactly matches variable concept"
+                        )
+                    )
+                    continue
+
+                # Calculate match quality metrics for non-perfect matches
                 exact_phrase_match = query_lower in combined_text
 
                 # Count matching terms
@@ -847,7 +886,7 @@ class QueryProcessor:
 
                 # Matching score calculation that considers phrase matches and term matches
                 if exact_phrase_match:
-                    # Direct phrase match (highest priority) - INCREASED THRESHOLD
+                    # Direct phrase match (high priority) - INCREASED THRESHOLD
                     exact_matches.append(
                         QueryResult(
                             question=question,
@@ -864,21 +903,21 @@ class QueryProcessor:
                             relevance_explanation=f"All query terms found in variable text"
                         )
                     )
-                elif match_ratio >= 0.75:
+                elif match_ratio >= 0.8:
                     # Most terms match - INCREASED THRESHOLD
                     good_matches.append(
                         QueryResult(
                             question=question,
-                            similarity_score=0.88,  # Increased from 0.85
+                            similarity_score=0.90,  # Increased from 0.88
                             relevance_explanation=f"Most query terms found in variable text"
                         )
                     )
-                elif match_ratio >= 0.5:
+                elif match_ratio >= 0.6:
                     # Half or more terms match - INCREASED THRESHOLD
                     partial_matches.append(
                         QueryResult(
                             question=question,
-                            similarity_score=0.78,  # Increased from 0.75
+                            similarity_score=0.85,  # Increased from 0.78
                             relevance_explanation=f"Some query terms found in variable text"
                         )
                     )
