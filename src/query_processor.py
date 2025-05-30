@@ -1135,7 +1135,6 @@ class QueryProcessor:
         return final_score, explanation
 
 
-
     def generate_answer(self, query: str, intent: QueryIntent, results: List[QueryResult]) -> str:
         """
         Generate an answer based on query intent and relevant results with improved structure
@@ -1184,18 +1183,18 @@ class QueryProcessor:
 
                 return answer
 
-            # Organize results into multiple tiers by relevance - ADJUSTED THRESHOLDS
-            exact_matches = []  # 0.95-1.0: Perfect or near-perfect matches (increased from 0.9)
-            high_relevance = []  # 0.85-0.94: Very relevant (adjusted range)
-            medium_relevance = []  # 0.75-0.84: Somewhat relevant (adjusted range)
-            low_relevance = []  # Below 0.75: Limited relevance (adjusted threshold)
+            # Organize results into multiple tiers by relevance - CORRECTED THRESHOLDS
+            exact_matches = []      # 0.99-1.0: Perfect or near-perfect matches
+            high_relevance = []     # 0.85-0.98: Very relevant 
+            medium_relevance = []   # 0.75-0.84: Somewhat relevant
+            low_relevance = []      # Below 0.75: Limited relevance
 
             for result in results:
-                if result.similarity_score >= 0.95:  # Increased from 0.9
+                if result.similarity_score >= 0.99:  # Only 0.99 and 1.00 are "exact"
                     exact_matches.append(result)
-                elif result.similarity_score >= 0.85:  # Increased from 0.8
+                elif result.similarity_score >= 0.85:  # 0.85-0.98 are "high relevance"
                     high_relevance.append(result)
-                elif result.similarity_score >= 0.75:  # Increased from 0.7
+                elif result.similarity_score >= 0.75:  # 0.75-0.84 are "medium relevance"
                     medium_relevance.append(result)
                 else:
                     low_relevance.append(result)
@@ -1315,13 +1314,16 @@ class QueryProcessor:
         except Exception as e:
             print(f"Error in structured answer generation: {e}")
             fallback_answer = f"I found {len(results)} variables related to your query about '{query}'. The most relevant ones include: " + \
-                              ", ".join([f"{r.question.variable_name} ({r.question.description})" for r in results[:3]])
+                            ", ".join([f"{r.question.variable_name} ({r.question.description})" for r in results[:3]])
 
             # Cache the fallback answer
             self._memory_cache['answer'][answer_key] = fallback_answer
             self.cache_manager.set(answer_key, fallback_answer)
 
             return fallback_answer
+
+
+
 
     def process_query(self, user_query: UserQuery) -> ProcessedQuery:
         """
