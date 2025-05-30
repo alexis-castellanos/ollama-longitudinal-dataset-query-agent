@@ -761,7 +761,6 @@ class QueryProcessor:
 
         return intent
 
-
     def find_relevant_questions(self, query: str, intent: QueryIntent, limit: int = 20) -> List[QueryResult]:
         """
         Find relevant survey questions based on query and intent using enhanced relevance scoring.
@@ -831,9 +830,9 @@ class QueryProcessor:
 
             # Enhanced categorization with more granular scoring
             exact_matches = []
-            high_relevance = []    # High relevance matches
+            high_relevance = []
             good_matches = []
-            medium_matches = []    # Medium relevance matches  
+            medium_matches = []
             partial_matches = []
 
             for question in all_questions:
@@ -841,37 +840,21 @@ class QueryProcessor:
                 question_text_lower = question.question.lower() if question.question else ""
                 combined_text = f"{description_lower} {question_text_lower}"
 
-                # Check for PERFECT matches first
+                # ENHANCED PERFECT/NEAR-PERFECT MATCH DETECTION
                 description_clean = description_lower.strip()
                 question_clean = question_text_lower.strip()
                 
-                perfect_match = False
+                # Check for different levels of "perfect" matches using new method
+                match_score, match_explanation = self._determine_match_level(
+                    cleaned_query, description_clean, question_clean, combined_text
+                )
                 
-                # Perfect match conditions for exact conceptual matches
-                if cleaned_query in description_clean:
-                    if (cleaned_query == description_clean or 
-                        f" {cleaned_query} " in f" {description_clean} " or
-                        description_clean.startswith(f"{cleaned_query} ") or
-                        description_clean.endswith(f" {cleaned_query}")):
-                        perfect_match = True
-                
-                if cleaned_query in question_clean:
-                    if (cleaned_query == question_clean or 
-                        f" {cleaned_query} " in f" {question_clean} " or
-                        question_clean.startswith(f"{cleaned_query} ") or
-                        question_clean.endswith(f" {cleaned_query}")):
-                        perfect_match = True
-                
-                # Special handling for common research concepts
-                if "satisfied with life" in cleaned_query and "satisfied with life" in description_clean:
-                    perfect_match = True
-                
-                if perfect_match:
+                if match_score >= 0.99:  # Perfect and near-perfect matches
                     exact_matches.append(
                         QueryResult(
                             question=question,
-                            similarity_score=1.00,
-                            relevance_explanation="Perfect match - query exactly matches variable concept"
+                            similarity_score=match_score,
+                            relevance_explanation=match_explanation
                         )
                     )
                     continue
@@ -885,9 +868,7 @@ class QueryProcessor:
                 # Only include results above minimum threshold
                 if score >= 0.60:
                     # Categorize based on enhanced scores
-                    if score >= 0.95:
-                        exact_matches.append(QueryResult(question=question, similarity_score=score, relevance_explanation=explanation))
-                    elif score >= 0.90:
+                    if score >= 0.90:
                         high_relevance.append(QueryResult(question=question, similarity_score=score, relevance_explanation=explanation))
                     elif score >= 0.80:
                         good_matches.append(QueryResult(question=question, similarity_score=score, relevance_explanation=explanation))
@@ -948,6 +929,89 @@ class QueryProcessor:
         self.cache_manager.set(cache_key, final_results)
 
         return final_results
+
+
+    def _determine_match_level(self, cleaned_query: str, description_clean: str, 
+                            question_clean: str, combined_text: str) -> tuple:
+        """
+        Determine the level of match and return (score, explanation).
+        Only gives perfect scores (1.00/0.99) for matches in the DESCRIPTION, not question text.
+        
+        Returns:
+            tuple: (score, explanation) where score is 1.00, 0.99, or 0.0 (not a perfect match)
+        """
+        
+        # For single-word queries like "health", "life", etc.
+        if len(cleaned_query.split()) == 1:
+            query_word = cleaned_query
+            
+            # PERFECT MATCH (1.00): Query word appears as the primary concept in DESCRIPTION ONLY
+            # Examples: "Q39F. HEALTH", "SATISFIED WITH LIFE"
+            
+            # Only check description, ignore question text for perfect matches
+            if query_word in description_clean:
+                
+                # Special patterns for perfect matches in description
+                perfect_patterns = [
+                    f"q\\d+[a-z]?\\. {query_word}$",  # "Q39F. HEALTH" (exact)
+                    f"q\\d+[a-z]?\\. {query_word} \\(.*\\)$",  # "Q39F. HEALTH (something)"
+                    f"^{query_word}$",  # Just "HEALTH" alone
+                    f"^{query_word} \\(.*\\)$",  # "HEALTH (something)"
+                ]
+                
+                import re
+                for pattern in perfect_patterns:
+                    if re.search(pattern, description_clean):
+                        return 1.00, "Perfect match - query is primary concept in description"
+                
+                # Check if description is essentially just the query word with minimal additions
+                desc_words = description_clean.split()
+                
+                # If description is very short and contains the query word prominently
+                if len(desc_words) <= 3:
+                    # Remove common prefixes like "q39f.", "q30a.", etc.
+                    clean_desc_words = [word for word in desc_words if not re.match(r'^q\d+[a-z]?\.$', word)]
+                    
+                    # If after removing prefixes, it's just the query word
+                    if len(clean_desc_words) == 1 and clean_desc_words[0] == query_word:
+                        return 1.00, "Perfect match - query is core concept in description"
+            
+            # NEAR-PERFECT MATCH (0.99): Query word + one related concept IN DESCRIPTION
+            # Examples: "ONGOING HEALTH PROBLEM", "HEALTH INSURANCE"
+            
+            if query_word in description_clean:
+                # Count meaningful words in description (excluding prefixes)
+                desc_words = description_clean.split()
+                meaningful_words = [word for word in desc_words if not re.match(r'^q\d+[a-z]?\.$', word)]
+                
+                # If description has query word + 1-2 additional meaningful words
+                if 2 <= len(meaningful_words) <= 3 and query_word in meaningful_words:
+                    # Check for common modifiers that make it near-perfect
+                    modifiers = ["ongoing", "problem", "problems", "insurance", "ins", "condition", 
+                            "status", "care", "issues", "concerns", "yourself", "self"]
+                    if any(modifier in description_clean for modifier in modifiers):
+                        return 0.99, "Near-perfect match - query + specific modifier in description"
+            
+        # For multi-word queries like "satisfied with life"
+        else:
+            # PERFECT MATCH (1.00): Exact phrase appears as primary concept in DESCRIPTION
+            if cleaned_query in description_clean:
+                # Check if it's the main concept in description, not just mentioned
+                if (description_clean == cleaned_query or
+                    description_clean.startswith(f"q") and cleaned_query in description_clean or
+                    description_clean.endswith(cleaned_query)):
+                    return 1.00, "Perfect match - exact phrase as primary concept in description"
+            
+            # NEAR-PERFECT MATCH (0.99): Most words match with high relevance IN DESCRIPTION
+            query_words = cleaned_query.split()
+            desc_words = description_clean.split()
+            
+            matching_words = sum(1 for word in query_words if word in desc_words)
+            if matching_words >= len(query_words) * 0.8:  # 80% of words match in description
+                return 0.99, "Near-perfect match - most query words in description"
+        
+        # Not a perfect or near-perfect match
+        return 0.0, ""
 
 
     def _calculate_enhanced_relevance_score(self, query_lower: str, query_terms: list, cleaned_query: str, 
